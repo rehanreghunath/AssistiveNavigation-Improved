@@ -134,12 +134,12 @@ Performance regressions must be measured. If your change touches the hot loop, p
 
 These are hard constraints, not guidelines:
 
-- The pipeline must sustain 30 FPS on a Galaxy A14 (Helio G80)
+- The pipeline must sustain 30 FPS on a low-mid range android phone (Helios G80/Exynos 1330)
 - No `std::vector`, `cv::Mat`, or any other heap allocation inside `processFrame`, `trackFeatures`, or `renderToRgba`
 - No JNI object creation (e.g. `NewFloatArray`, `NewByteArray`) must block the camera thread for more than 2ms
 - The camera executor thread must return from `analyze()` within 33ms
 
-If a new feature cannot meet these constraints, it must run on a separate low-priority thread and must not block the camera or GL threads.
+If a new feature cannot meet these constraints, it must run on a separate low-priority thread and must not block the camera thread.
 
 ---
 

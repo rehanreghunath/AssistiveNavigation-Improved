@@ -16,7 +16,6 @@ find_package(OpenCV REQUIRED core imgproc video)
 
 add_library(assistivenav SHARED
     FlowEngine.cpp
-    FlowRenderer.cpp
     jni_bridge.cpp
 )
 
@@ -28,7 +27,5 @@ target_include_directories(assistivenav PRIVATE
 target_link_libraries(assistivenav
     android
     log
-    GLESv3
-    EGL
     ${OpenCV_LIBS}
 )

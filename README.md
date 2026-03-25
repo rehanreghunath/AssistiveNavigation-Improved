@@ -74,8 +74,8 @@ ImageView (Kotlin)     RGBA bitmap drawn each frame
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/yourname/AssistiveNav.git
-cd AssistiveNav
+git clone https://github.com/rehanreghunath/AssistiveNavigation-Improved.git
+cd AssistiveNavigation-Improved
 ```
 
 **2. Download and extract OpenCV Android SDK**

@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import com.rehanreghunath.assistivenav.databinding.ActivityMainBinding
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import androidx.core.graphics.createBitmap
 
 class MainActivity : AppCompatActivity() {
 
@@ -61,7 +62,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPipeline() {
         isRunning = true
-        binding.start.text     = "STOP"
+        binding.start.setText(R.string.stop)
         binding.debugText.text = "Starting..."
         startCamera()
     }
@@ -76,8 +77,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         runOnUiThread {
-            binding.start.text      = "START"
-            binding.debugText.text  = "Waiting..."
+            binding.start.setText(R.string.start)
+            binding.debugText.setText(R.string.waiting)
             binding.flowView.visibility = android.view.View.INVISIBLE
         }
     }
@@ -128,7 +129,7 @@ class MainActivity : AppCompatActivity() {
         private var hudFrameCount = 0
 
         override fun analyze(image: ImageProxy) {
-            try {
+            image.use { image ->
                 if (!isRunning) return
 
                 val w = image.width
@@ -137,17 +138,11 @@ class MainActivity : AppCompatActivity() {
                 if (!pipelineInitialized) {
                     FlowBridge.nativeInit(w, h)
 
-                    // Tell C++ how many degrees to rotate the output mat to match the display.
-                    // rotationDegrees is device-specific and accounts for sensor mounting angle.
                     val rotation = image.imageInfo.rotationDegrees
                     FlowBridge.nativeSetRenderRotation(rotation)
 
-                    // After rotation, 90°/270° swaps width and height.
-                    // The bitmap must match the POST-rotation dimensions so copyPixelsFromBuffer
-                    // doesn't throw due to size mismatch.
                     val (bmpW, bmpH) = if (rotation == 90 || rotation == 270) h to w else w to h
-                    bitmap = android.graphics.Bitmap.createBitmap(
-                        bmpW, bmpH, android.graphics.Bitmap.Config.ARGB_8888)
+                    bitmap = createBitmap(bmpW, bmpH)
 
                     pipelineInitialized = true
                     Log.d(TAG, "Pipeline init ${w}x${h}, bitmap=${bmpW}x${bmpH}")
@@ -195,9 +190,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-
-            } finally {
-                image.close()
             }
         }
     }
@@ -221,8 +213,8 @@ class MainActivity : AppCompatActivity() {
                 startPipeline()
             else {
                 isRunning = false
-                binding.start.text     = "START"
-                binding.debugText.text = "Waiting..."
+                binding.start.setText(R.string.start)
+                binding.debugText.setText(R.string.waiting)
                 Toast.makeText(this, "Camera permission required", Toast.LENGTH_LONG).show()
             }
         }

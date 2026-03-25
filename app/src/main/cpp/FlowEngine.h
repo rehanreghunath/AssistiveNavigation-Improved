@@ -67,7 +67,7 @@ namespace assistivenav {
         static constexpr float kGFTTMinDist      = 15.0f;  // min px between detected corners
         static constexpr int   kGFTTBlockSize    = 7;      // neighbourhood size for corner score
 
-        void preprocessFrame(const cv::Mat& raw, cv::Mat& out) const;
+        static void preprocessFrame(const cv::Mat& raw, cv::Mat& out) ;
         void detectFeatures();
         void trackFeatures(FlowResult& result);
 

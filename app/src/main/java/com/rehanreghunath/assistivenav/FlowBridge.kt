@@ -28,13 +28,6 @@ object FlowBridge {
 
     /* Release all native resources. Call from Activity.onDestroy(). */
     external fun nativeDestroy()
-
-    external fun nativeSurfaceCreated()
-    external fun nativeSurfaceChanged(width: Int, height: Int)
-
-    /** Returns [fps, trackedCount] or null on error. */
-    external fun nativeDrawFrame(): FloatArray?
-
     external fun nativeGetRgbaFrame(): ByteArray?
     external fun nativeSetRenderRotation(degrees: Int)
 }

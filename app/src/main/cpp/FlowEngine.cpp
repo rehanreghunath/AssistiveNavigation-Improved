@@ -41,7 +41,7 @@ namespace assistivenav {
         mRenderRotation = degrees;
     }
 
-    void FlowEngine::preprocessFrame(const cv::Mat& raw, cv::Mat& out) const {
+    void FlowEngine::preprocessFrame(const cv::Mat& raw, cv::Mat& out) {
         cv::GaussianBlur(raw, out, cv::Size(kGaussKernelSize, kGaussKernelSize), 0);
     }
 
@@ -208,7 +208,7 @@ namespace assistivenav {
         }
 
         const uint8_t* ptr = output.data;
-        return std::vector<uint8_t>(ptr, ptr + output.total() * 4);
+        return {ptr, ptr + output.total() * 4};
     }
 
 } // namespace assistivenav

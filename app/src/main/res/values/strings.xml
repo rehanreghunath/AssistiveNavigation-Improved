@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">AssistiveNav-improved</string>
+    <string name="start">START</string>
+    <string name="stop">STOP</string>
+    <string name="waiting">Waiting...</string>
+
 </resources>
