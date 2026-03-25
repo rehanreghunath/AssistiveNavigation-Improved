@@ -127,10 +127,29 @@ class MainActivity : AppCompatActivity() {
         private var yBuffer: ByteArray? = null
         private var bitmap: android.graphics.Bitmap? = null
         private var hudFrameCount = 0
+        private var lastFrameTimeNs = 0L
+
+        private var smoothedFps = 0f
+        private val fpsAlpha = 0.1f
 
         override fun analyze(image: ImageProxy) {
-            image.use { image ->
+
+            val nowNs = System.nanoTime()
+
+            image.use {
                 if (!isRunning) return
+
+
+                if (lastFrameTimeNs != 0L) {
+                    val deltaSeconds = (nowNs - lastFrameTimeNs) / 1_000_000_000f
+
+                    if (deltaSeconds < 1f) {
+                        val instantFps = 1f / deltaSeconds
+
+                        smoothedFps = fpsAlpha * instantFps + (1f - fpsAlpha) * smoothedFps
+                    }
+                }
+                lastFrameTimeNs = nowNs
 
                 val w = image.width
                 val h = image.height
@@ -162,24 +181,21 @@ class MainActivity : AppCompatActivity() {
                     yBuffer!!, w, h, rowStride, image.imageInfo.timestamp
                 )
 
-                // Get RGBA frame with arrows drawn by OpenCV
                 val rgba = FlowBridge.nativeGetRgbaFrame() ?: return
                 val bmp  = bitmap ?: return
 
-                // Wrap bytes in a ByteBuffer and push to Bitmap — no extra copy
                 bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
 
-                // HUD is updated every HUD_UPDATE_EVERY frames
-                // At 30 fps this is ~3 updates/second
                 if (++hudFrameCount >= HUD_UPDATE_EVERY) {
                     hudFrameCount = 0
                     val tracked = stats?.get(0)?.toInt() ?: 0
                     val total   = stats?.get(1)?.toInt() ?: 0
+                    val fpsDisplay = smoothedFps.toInt()
                     runOnUiThread {
                         if (isRunning) {
                             binding.flowView.setImageBitmap(bmp)
                             binding.flowView.visibility = android.view.View.VISIBLE
-                            binding.debugText.text = "Tracked: $tracked / $total"
+                            binding.debugText.text = "FPS: $fpsDisplay  |  Tracked: $tracked / $total"
                         }
                     }
                 } else {
