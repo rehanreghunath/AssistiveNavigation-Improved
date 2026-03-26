@@ -1,19 +1,26 @@
 import java.util.Properties
 
-// Read local.properties
+// ── Read local.properties ─────────────────────────────────────────────────────
 val localProps = Properties()
 val localPropsFile = rootProject.file("local.properties")
 if (localPropsFile.exists()) {
     localPropsFile.inputStream().use { localProps.load(it) }
 }
+
 val opencvDir = localProps.getProperty("opencv.dir")
     ?: error("opencv.dir not set in local.properties")
+
+val openalDir = localProps.getProperty("openal.dir")
+    ?: error(
+        "openal.dir not set in local.properties.\n" +
+                "Build OpenAL-Soft for arm64-v8a (see CMakeLists.txt for instructions)\n" +
+                "then add:  openal.dir=/absolute/path/to/openal-soft"
+    )
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
 }
-
 
 android {
     namespace = "com.rehanreghunath.assistivenav"
@@ -33,7 +40,13 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments("-DANDROID_STL=c++_shared", "-DOpenCV_DIR=$opencvDir")
+                arguments(
+                    "-DANDROID_STL=c++_shared",
+                    "-DOpenCV_DIR=$opencvDir",
+                    // Pass the openal-soft root to CMakeLists so it can find
+                    // the headers and the prebuilt .so.
+                    "-DOPENAL_DIR=$openalDir"
+                )
                 cppFlags("-std=c++17")
             }
         }
@@ -48,7 +61,14 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("$opencvDir/../libs")
+            jniLibs.srcDirs(
+                // OpenCV prebuilt .so files (libopencv_java4.so etc.)
+                "$opencvDir/../libs",
+                // OpenAL-Soft prebuilt libopenal.so
+                // The directory must contain ABI subdirectories:
+                //   arm64-v8a/libopenal.so
+                "$openalDir/build-android"
+            )
         }
 
         buildTypes {
@@ -93,4 +113,3 @@ android {
         androidTestImplementation(libs.androidx.espresso.core)
     }
 }
-

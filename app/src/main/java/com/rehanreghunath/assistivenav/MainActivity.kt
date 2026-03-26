@@ -2,6 +2,10 @@ package com.rehanreghunath.assistivenav
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -16,15 +20,49 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
 import com.rehanreghunath.assistivenav.databinding.ActivityMainBinding
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import androidx.core.graphics.createBitmap
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
+
+    // ── IMU ────────────────────────────────────────────────────────────────────
+    // SensorManager is a system service; we hold a reference so we can
+    // register and unregister cleanly with the activity lifecycle.
+    private lateinit var sensorManager: SensorManager
+
+    // TYPE_ROTATION_VECTOR fuses accelerometer + gyroscope + magnetometer into
+    // a quaternion representing the device's absolute orientation.  It is more
+    // stable than raw gyroscope integration and requires no manual drift correction.
+    // Android guarantees this sensor exists on any device with an accelerometer
+    // and gyroscope; we check at runtime and degrade gracefully if absent.
+    private var rotationSensor: Sensor? = null
+
+    // Delivers rotation-vector events to the native IMU fusion layer.
+    // Declared as a property so it can be unregistered by reference.
+    private val rotationListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            // event.values for TYPE_ROTATION_VECTOR is always [x, y, z, w] (unit
+            // quaternion).  A 5th element (heading accuracy in radians) may be
+            // present on some devices; the native side ignores it.
+            // event.timestamp is nanoseconds of elapsed real time — the same
+            // time base as System.nanoTime(), which the camera pipeline also uses.
+            FlowBridge.nativeUpdateImu(event.values, event.timestamp)
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
+            // Accuracy changes (UNRELIABLE / LOW / MEDIUM / HIGH) are logged but
+            // we do not stop compensation on degraded accuracy.  Low accuracy means
+            // the heading estimate is off, but the short-term delta between two
+            // consecutive readings (which is all we use) remains reliable as long
+            // as the gyroscope hardware is working.
+            Log.d(TAG, "Rotation sensor accuracy changed to $accuracy")
+        }
+    }
 
     @Volatile private var isRunning         = false
     private var pipelineInitialized         = false
@@ -34,8 +72,17 @@ class MainActivity : AppCompatActivity() {
         private const val TAG              = "MainActivity"
         private const val REQUEST_CAMERA   = 100
         private const val HUD_UPDATE_EVERY = 10
+
+        // SENSOR_DELAY_GAME (~50 Hz) is the best balance between IMU data
+        // freshness and battery consumption for a 30 fps optical-flow pipeline.
+        // SENSOR_DELAY_FASTEST (~200 Hz) would deliver more data than the camera
+        // can consume and wastes CPU waking the sensor thread unnecessarily.
+        private const val IMU_DELAY = SensorManager.SENSOR_DELAY_GAME
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,7 +91,34 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
 
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+
+        if (rotationSensor == null) {
+            // The device has no rotation-vector sensor.  The pipeline still works
+            // correctly — ImuFusion::compensate returns immediately when no sensor
+            // data has arrived, so flow vectors are used as-is without compensation.
+            Log.w(TAG, "TYPE_ROTATION_VECTOR unavailable; IMU compensation disabled")
+        }
+
         binding.start.setOnClickListener { onToggle() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-register the sensor whenever the activity becomes visible so that
+        // orientation data is fresh when the camera restarts.
+        rotationSensor?.let {
+            sensorManager.registerListener(rotationListener, it, IMU_DELAY)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Unregister immediately when the activity is not visible.
+        // Leaving a sensor listener registered in the background drains the
+        // battery on every device, regardless of whether we're processing frames.
+        sensorManager.unregisterListener(rotationListener)
     }
 
     override fun onDestroy() {
@@ -53,6 +127,9 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Pipeline control
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun onToggle() {
         if (isRunning) stopPipeline()
@@ -83,6 +160,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Camera
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
@@ -122,31 +202,30 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Frame analysis
+    // ─────────────────────────────────────────────────────────────────────────
 
     private inner class FrameAnalyzer : ImageAnalysis.Analyzer {
         private var yBuffer: ByteArray? = null
         private var bitmap: android.graphics.Bitmap? = null
         private var hudFrameCount = 0
-        private var lastFrameTimeNs = 0L
 
-        private var smoothedFps = 0f
-        private val fpsAlpha = 0.1f
+        private var lastFrameTimeNs = 0L
+        private var smoothedFps     = 0f
+        private val fpsAlpha        = 0.1f
 
         override fun analyze(image: ImageProxy) {
-
             val nowNs = System.nanoTime()
 
             image.use {
                 if (!isRunning) return
 
-
                 if (lastFrameTimeNs != 0L) {
                     val deltaSeconds = (nowNs - lastFrameTimeNs) / 1_000_000_000f
-
                     if (deltaSeconds < 1f) {
-                        val instantFps = 1f / deltaSeconds
-
-                        smoothedFps = fpsAlpha * instantFps + (1f - fpsAlpha) * smoothedFps
+                        smoothedFps = fpsAlpha * (1f / deltaSeconds) +
+                                (1f - fpsAlpha) * smoothedFps
                     }
                 }
                 lastFrameTimeNs = nowNs
@@ -156,13 +235,10 @@ class MainActivity : AppCompatActivity() {
 
                 if (!pipelineInitialized) {
                     FlowBridge.nativeInit(w, h)
-
                     val rotation = image.imageInfo.rotationDegrees
                     FlowBridge.nativeSetRenderRotation(rotation)
-
                     val (bmpW, bmpH) = if (rotation == 90 || rotation == 270) h to w else w to h
                     bitmap = createBitmap(bmpW, bmpH)
-
                     pipelineInitialized = true
                     Log.d(TAG, "Pipeline init ${w}x${h}, bitmap=${bmpW}x${bmpH}")
                 }
@@ -188,14 +264,15 @@ class MainActivity : AppCompatActivity() {
 
                 if (++hudFrameCount >= HUD_UPDATE_EVERY) {
                     hudFrameCount = 0
-                    val tracked = stats?.get(0)?.toInt() ?: 0
-                    val total   = stats?.get(1)?.toInt() ?: 0
+                    val tracked    = stats?.get(0)?.toInt() ?: 0
+                    val total      = stats?.get(1)?.toInt() ?: 0
                     val fpsDisplay = smoothedFps.toInt()
                     runOnUiThread {
                         if (isRunning) {
                             binding.flowView.setImageBitmap(bmp)
                             binding.flowView.visibility = android.view.View.VISIBLE
-                            binding.debugText.text = "FPS: $fpsDisplay  |  Tracked: $tracked / $total"
+                            binding.debugText.text =
+                                "FPS: $fpsDisplay  |  Tracked: $tracked / $total"
                         }
                     }
                 } else {
@@ -210,6 +287,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Permissions
+    // ─────────────────────────────────────────────────────────────────────────
 
     private fun hasCameraPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
