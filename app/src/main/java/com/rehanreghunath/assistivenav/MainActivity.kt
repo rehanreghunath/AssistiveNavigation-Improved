@@ -178,7 +178,7 @@ class MainActivity : AppCompatActivity() {
             val resSel = ResolutionSelector.Builder()
                 .setResolutionStrategy(
                     ResolutionStrategy(
-                        Size(640, 480),
+                        Size(1280, 720),
                         ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
                     )
                 ).build()

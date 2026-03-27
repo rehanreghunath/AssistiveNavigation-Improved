@@ -9,10 +9,14 @@ namespace assistivenav {
     // ── Optical-flow output ───────────────────────────────────────────────────
 
     struct FlowVector {
-        float x0, y0;    // pixel origin of the tracked point
-        float dx, dy;    // frame-to-frame displacement (next − prev)
-        float magnitude; // sqrt(dx²+dy²), pre-computed to avoid repeating it
-        float angle;     // atan2(dy,dx) in radians, pre-computed for the same reason
+        float x0, y0;       // pixel origin of the tracked point
+        float dx, dy;       // frame-to-frame displacement (next − prev)
+        float magnitude;    // sqrt(dx²+dy²), pre-computed
+        float angle;        // atan2(dy,dx) in radians
+        // [0,1]: 0 = fully explained by camera ego-motion (floor/far wall),
+        //         1 = cannot be explained by ego-motion (obstacle).
+        // Populated by FlowClassifier after ImuFusion; zero-initialised in FlowEngine.
+        float anomalyScore = 0.0f;
     };
 
     struct FlowResult {
@@ -36,31 +40,31 @@ namespace assistivenav {
 
     struct GridResult {
         std::array<CellMetrics, 9> cells;
-        float   foeX;
-        float   foeY;
+        float   foeX;      // normalised [0,1]
+        float   foeY;      // normalised [0,1]
         bool    foeValid;
         int64_t timestampNs;
     };
 
     // ── Obstacle tracking output ──────────────────────────────────────────────
 
-    // Maximum number of simultaneously tracked obstacles.  5 is sufficient for
-    // practical navigation and keeps audio sources well below the point where
-    // spatial overlap degrades localisation quality for the user.
     static constexpr int kMaxObstacles = 5;
 
     struct TrackedObstacle {
-        float normX;       // horizontal centroid, normalised [0,1] (0=left, 1=right)
-        float normY;       // vertical centroid,   normalised [0,1] (0=top,  1=bottom)
-        float smoothedMag; // EMA-filtered mean flow magnitude (px/frame)
-        int   age;         // consecutive frames this obstacle has been matched
-        int   missedFrames;// consecutive frames without a matching blob (hysteresis)
-        bool  active;      // true = slot occupied
+        float normX;            // horizontal centroid, normalised [0,1]
+        float normY;            // vertical centroid,   normalised [0,1]
+        float smoothedMag;      // EMA-filtered anomaly-weighted flow magnitude (px/frame)
+        // Mean anomaly score of the blob's constituent vectors, EMA-smoothed.
+        // Reflects how likely the detection is a real obstacle vs ego-motion artefact.
+        float confidenceScore = 0.0f;
+        int   age;
+        int   missedFrames;
+        bool  active;
     };
 
     struct ObstacleFrame {
         std::array<TrackedObstacle, kMaxObstacles> obstacles;
-        int     activeCount;  // number of slots where active == true
+        int     activeCount;
         int64_t timestampNs;
     };
 

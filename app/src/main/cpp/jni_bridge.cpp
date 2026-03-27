@@ -7,6 +7,7 @@
 #include "ImuFusion.h"
 #include "ObstacleTracker.h"
 #include "AudioEngine.h"
+#include "FlowClassifier.h"
 
 #define LOG_TAG "JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -19,6 +20,7 @@ static std::unique_ptr<assistivenav::ObstacleTracker> gObstacleTracker;
 static std::unique_ptr<assistivenav::AudioEngine>    gAudioEngine;
 static std::unique_ptr<assistivenav::FlowResult>     gLastResult;
 static std::unique_ptr<assistivenav::GridResult>     gLastGridResult;
+static std::unique_ptr<assistivenav::FlowClassifier> gFlowClassifier;
 
 static std::mutex gPipelineMutex;
 
@@ -42,6 +44,7 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeInit(
     gObstacleTracker = std::make_unique<assistivenav::ObstacleTracker>(
             static_cast<int>(width), static_cast<int>(height));
     gAudioEngine     = std::make_unique<assistivenav::AudioEngine>();
+    gFlowClassifier = std::make_unique<assistivenav::FlowClassifier>();
 
     if (!gAudioEngine->isReady()) {
         LOGE("AudioEngine init failed — continuing without audio");
@@ -98,14 +101,27 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeProcessFrame(
     if (!result.isFirstFrame) {
         if (gImuFusion) gImuFusion->compensate(result);
 
+        // Run grid analysis first so the current-frame FOE is available
+        // for the classifier.  GridAnalyzer uses all vectors before they are
+        // tagged; the FOE estimate is dominated by the background majority and
+        // is robust to a small number of obstacle vectors.
+        assistivenav::GridResult gridResult{};
         if (gGridAnalyzer) {
-            gLastGridResult = std::make_unique<assistivenav::GridResult>(
-                    gGridAnalyzer->analyze(result));
+            gridResult      = gGridAnalyzer->analyze(result);
+            gLastGridResult = std::make_unique<assistivenav::GridResult>(gridResult);
         }
 
+        // Tag each vector with an anomalyScore using the just-computed FOE.
+        if (gFlowClassifier) {
+            gFlowClassifier->classify(result, gridResult,
+                                      static_cast<int>(width),
+                                      static_cast<int>(height));
+        }
+
+        // ObstacleTracker and AudioEngine operate only on the classified vectors.
         if (gObstacleTracker && gAudioEngine) {
             const assistivenav::ObstacleFrame obstacles =
-                    gObstacleTracker->update(result);
+                    gObstacleTracker->update(result, gridResult);
             gAudioEngine->update(obstacles);
         }
     }
@@ -173,6 +189,7 @@ JNIEXPORT void JNICALL
 Java_com_rehanreghunath_assistivenav_FlowBridge_nativeDestroy(
         JNIEnv* /*env*/, jobject /*thiz*/) {
     std::lock_guard<std::mutex> lock(gPipelineMutex);
+    gFlowClassifier.reset();
     gAudioEngine.reset();
     gObstacleTracker.reset();
     gGridAnalyzer.reset();
@@ -180,6 +197,7 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeDestroy(
     gPipeline.reset();
     gLastResult.reset();
     gLastGridResult.reset();
+
     LOGI("All native resources destroyed");
 }
 

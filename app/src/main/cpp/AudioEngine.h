@@ -73,7 +73,7 @@ namespace assistivenav {
 
         // Flow magnitude (px/frame) that maps to maximum gain.
         // 20 px/frame at 640×480 is a fast-approaching object.
-        static constexpr float kMaxMagForGain = 20.0f;
+//        static constexpr float kMaxMagForGain = 20.0f;
 
         // Global headroom.  kMaxObstacles sources at full gain sum to
         // kMaxObstacles * kMasterGain; 0.75 keeps the mix well below 0 dBFS.
@@ -96,6 +96,16 @@ namespace assistivenav {
         // Proximity is encoded by gain, not by Z, because AL_NONE distance
         // model means Z has no effect on gain anyway.
         static constexpr float kSourceDepth = -1.5f;
+
+        // Flow magnitude (anomaly-weighted, px/frame) that maps to full gain.
+        // Lower than the previous 20.0 because smoothedMag is now scaled by
+        // the anomaly score (max ~0.9 for a confirmed obstacle).
+        static constexpr float kMaxMagForGain    = 5.0f;
+
+        // Confidence band for the gain ramp: below kMinConfidence → silent,
+        // at or above kFullConfidence → full magnitude gain.
+        static constexpr float kMinConfidence    = 0.30f;
+        static constexpr float kFullConfidence   = 0.70f;
 
         static constexpr int   kSampleRate  = 44100;
         static constexpr int   kNoiseFrames = 44100;

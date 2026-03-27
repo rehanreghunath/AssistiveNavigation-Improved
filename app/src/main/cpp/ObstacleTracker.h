@@ -7,28 +7,34 @@ namespace assistivenav {
     // ─────────────────────────────────────────────────────────────────────────
     // ObstacleTracker
     //
-    // Converts a per-frame set of IMU-compensated flow vectors into a small
-    // list of temporally stable, spatially localised obstacles.
+    // Converts anomaly-classified, IMU-compensated flow vectors into a small
+    // list of temporally stable, spatially localised obstacle detections.
     //
-    // Algorithm (all O(N) in flow vector count, no heap allocation):
+    // Key change vs. the original design: every cell-activity and blob-quality
+    // decision is now driven by ANOMALY-WEIGHTED magnitude rather than raw
+    // magnitude.  This suppresses floor texture, ceiling reflections, and
+    // distant static surfaces that produce ego-motion-consistent flow, while
+    // preserving signal from pillars (closer than background → high magnitude
+    // anomaly), people approaching (convergent flow → high angular anomaly),
+    // and close walls (high combined score).
     //
+    // A blob also reports its spatial shape (aspect ratio) so that tall, narrow
+    // detections — characteristic of poles and pillars — can be recognised and
+    // handled with higher priority.
+    //
+    // Algorithm:
     //   1. ACTIVITY GRID — bin vectors into a 12×8 grid.  A cell is "active"
-    //      if it contains >= kMinVectors vectors with mean magnitude >=
-    //      kMinActionableMag after IMU compensation.
-    //
-    //   2. BLOB EXTRACTION — 4-connected flood-fill on the 96-cell activity
-    //      grid produces compact blobs.  Each blob's centroid is the
-    //      magnitude-weighted mean of its active cells.
-    //
-    //   3. MATCHING — greedy nearest-centroid matching assigns each blob to
-    //      an existing tracked obstacle within kMatchRadius.  Unmatched blobs
-    //      create new obstacle slots; unmatched obstacles accumulate
-    //      missedFrames and are retired after kMaxMissedFrames.
-    //
-    //   4. SMOOTHING — obstacle position and magnitude are EMA-filtered so
-    //      that single-frame noise spikes do not propagate to the audio layer.
-    //
-    // The resulting ObstacleFrame feeds AudioEngine::update() directly.
+    //      if it has >= kMinVectors vectors whose ANOMALY-WEIGHTED mean magnitude
+    //      exceeds kMinWeightedMag AND whose mean anomaly score exceeds
+    //      kMinMeanAnomaly.
+    //   2. BLOB EXTRACTION — 4-connected flood-fill produces compact blobs.
+    //      Centroids are magnitude-weighted, biased toward the highest-anomaly
+    //      regions.  Bounding box and aspect ratio are tracked for each blob.
+    //   3. MATCHING — greedy nearest-centroid within kMatchRadius.
+    //   4. SMOOTHING — position, magnitude, and confidence are EMA-filtered.
+    //   5. OUTPUT GATE — obstacle is forwarded to AudioEngine only after it has
+    //      been tracked for kMinAgeForAudio frames AND its confidenceScore
+    //      exceeds kMinBlobAnomaly.
     // ─────────────────────────────────────────────────────────────────────────
 
     class ObstacleTracker {
@@ -39,65 +45,82 @@ namespace assistivenav {
         ObstacleTracker(const ObstacleTracker&)            = delete;
         ObstacleTracker& operator=(const ObstacleTracker&) = delete;
 
-        /** Consume one frame of compensated flow vectors and return the current
-         *  set of tracked obstacles.  Safe to call every frame. */
-        ObstacleFrame update(const FlowResult& flow);
+        /** Consume one frame of classified, compensated flow vectors and return
+         *  the current set of tracked obstacles.
+         *  grid is used only for diagnostics; the anomaly scores embedded in
+         *  flow.vectors carry all classification information. */
+        ObstacleFrame update(const FlowResult& flow, const GridResult& grid);
 
     private:
         const int mWidth;
         const int mHeight;
 
-        // Persistent obstacle state — updated in-place each frame.
         std::array<TrackedObstacle, kMaxObstacles> mObstacles;
 
         // ── Analysis grid ─────────────────────────────────────────────────────
-        static constexpr int kGridCols = 12;
-        static constexpr int kGridRows = 8;
+        static constexpr int kGridCols  = 12;
+        static constexpr int kGridRows  = 8;
         static constexpr int kGridCells = kGridCols * kGridRows; // 96
 
-        // ── Thresholds ────────────────────────────────────────────────────────
+        // ── Activity thresholds ───────────────────────────────────────────────
 
-        // A cell needs at least this many vectors to be considered active.
-        // 2 filters single-point noise while allowing thinly textured regions.
-        static constexpr int   kMinVectors       = 2;
+        // Minimum flow vectors for a cell to be considered.
+        static constexpr int   kMinVectors      = 2;
 
-        // Below this mean magnitude (px/frame) a cell is background, not obstacle.
-        static constexpr float kMinActionableMag = 2.0f;
+        // Minimum ANOMALY-WEIGHTED mean magnitude per cell (px/frame).
+        // With anomaly weighting, a floor vector (mag=5, anomaly=0.05) contributes
+        // 0.25 whereas an obstacle vector (mag=5, anomaly=0.9) contributes 4.5.
+        static constexpr float kMinWeightedMag  = 3.0f;
 
-        // Normalised distance threshold for matching a blob to an existing obstacle.
-        static constexpr float kMatchRadius      = 0.25f;
+        // Minimum mean anomaly score for a cell to be active.
+        // Ensures cells dominated by ego-motion-consistent (floor/wall) vectors
+        // are excluded even if their raw magnitude is high.
+        static constexpr float kMinMeanAnomaly  = 0.25f;
 
-        // Audio does not start until an obstacle has been continuously tracked
-        // for this many frames, preventing transient flow bursts from triggering cues.
-        static constexpr int   kMinAgeForAudio   = 3;
+        // ── Blob / obstacle thresholds ────────────────────────────────────────
 
-        // After this many consecutive unmatched frames the obstacle slot is freed.
-        static constexpr int   kMaxMissedFrames  = 6;
+        static constexpr float kMatchRadius     = 0.25f;   // normalised distance
 
-        // EMA weights for position and magnitude smoothing.
-        // Lower = smoother but laggier; these values balance responsiveness vs. jitter.
-        static constexpr float kAlphaMag = 0.3f;
-        static constexpr float kAlphaPos = 0.4f;
+        // An obstacle slot accumulates confidence for this many frames before
+        // its sound source is unmuted.  Suppresses transient flow bursts.
+        static constexpr int   kMinAgeForAudio  = 5;
 
-        // ── Intermediate blob type (stack-only, not exposed) ──────────────────
+        // Minimum EMA-smoothed confidence (mean anomaly score of constituent
+        // vectors) for the obstacle to be forwarded to AudioEngine.
+        static constexpr float kMinBlobAnomaly  = 0.30f;
+
+        // Obstacle slot is freed after this many consecutive unmatched frames.
+        static constexpr int   kMaxMissedFrames = 6;
+
+        // Aspect ratio (height / width in grid cells) above which the blob is
+        // classified as "pillar-like".  Used to boost confidence for tall,
+        // narrow detections.
+        static constexpr float kPillarAspect    = 2.2f;
+
+        // EMA weights.
+        static constexpr float kAlphaMag        = 0.3f;
+        static constexpr float kAlphaPos        = 0.4f;
+        static constexpr float kAlphaConf       = 0.3f;
+
+        // ── Internal blob type (stack-only) ───────────────────────────────────
         struct Blob {
-            float normX;    // magnitude-weighted centroid, normalised [0,1]
+            float normX;            // anomaly-weighted centroid, normalised [0,1]
             float normY;
-            float meanMag;
+            float meanMag;          // anomaly-weighted mean magnitude (px/frame)
+            float meanAnomalyScore; // mean anomaly score across all vectors in blob
             int   cellCount;
-            bool  matched;  // set true during matching pass to avoid double-use
+            int   minRow, maxRow;   // bounding box in grid coordinates
+            int   minCol, maxCol;
+            bool  matched;
         };
 
         static constexpr int kMaxBlobs = 8;
 
-        /** Return the flat cell index for a given flow vector origin. */
-        int cellIndex(float x, float y) const;
+        int  cellIndex(float x, float y) const;
 
-        /** Populate the activity grid, then flood-fill blobs into out[]. */
         void extractBlobs(const FlowResult& flow,
                           Blob out[kMaxBlobs], int& outCount) const;
 
-        /** Match blobs to mObstacles, update survivors, retire missed ones. */
         void matchAndUpdate(const Blob blobs[kMaxBlobs], int blobCount,
                             int64_t timestampNs);
     };

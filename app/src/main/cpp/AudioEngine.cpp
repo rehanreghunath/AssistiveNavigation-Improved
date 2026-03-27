@@ -197,47 +197,38 @@ namespace assistivenav {
             const TrackedObstacle& obs = frame.obstacles[i];
             const ALuint src = mSources[i];
 
-            // Target gain: zero for inactive/unconfirmed obstacles, magnitude-
-            // mapped gain for confirmed ones.
+            // ── Gain from flow magnitude ──────────────────────────────────────
+            // smoothedMag is now anomaly-weighted (mag × anomalyScore), so even
+            // a fast-moving floor with low anomaly score stays quiet here.
+            const float magGain = std::clamp(obs.smoothedMag / kMaxMagForGain,
+                                             0.0f, 1.0f);
+
+            // ── Gain from detection confidence ────────────────────────────────
+            // Scale confidence linearly so that:
+            //   confidenceScore ≤ kMinConfidence  → 0   (silent)
+            //   confidenceScore ≥ kFullConfidence  → 1   (full volume)
+            // This provides a smooth ramp rather than a binary mute/unmute.
+            const float confGain = std::clamp(
+                    (obs.confidenceScore - kMinConfidence) /
+                    (kFullConfidence    - kMinConfidence),
+                    0.0f, 1.0f);
+
             const float targetGain = obs.active
-                                     ? std::clamp(obs.smoothedMag / kMaxMagForGain, 0.0f, 1.0f)
-                                       * kMasterGain
+                                     ? magGain * confGain * kMasterGain
                                      : 0.0f;
 
-            // EMA-smooth the gain to avoid clicks on obstacle appearance /
-            // disappearance.  The smoother runs even when targetGain == 0 so
-            // that fade-out is gradual rather than an instantaneous cut.
             mSmoothedGain[i] = kGainAlpha * targetGain +
                                (1.0f - kGainAlpha) * mSmoothedGain[i];
 
             alSourcef(src, AL_GAIN, mSmoothedGain[i]);
 
-            // Only update position when the obstacle is active — stale
-            // positions from a just-retired obstacle are irrelevant because
-            // the gain is already fading to zero.
             if (obs.active) {
                 float alX, alY, alZ;
                 imageToALPosition(obs.normX, obs.normY, alX, alY, alZ);
                 alSource3f(src, AL_POSITION, alX, alY, alZ);
             }
         }
-
-        // ── Diagnostic every ~3 s ─────────────────────────────────────────────
-        if (++mDiagFrames >= 90) {
-            mDiagFrames = 0;
-            LOGI("active=%d", frame.activeCount);
-            for (int i = 0; i < kMaxObstacles; ++i) {
-                if (frame.obstacles[i].active) {
-                    LOGI("  obs[%d] pos=(%.2f,%.2f) mag=%.1f age=%d gain=%.3f",
-                         i,
-                         frame.obstacles[i].normX,
-                         frame.obstacles[i].normY,
-                         frame.obstacles[i].smoothedMag,
-                         frame.obstacles[i].age,
-                         mSmoothedGain[i]);
-                }
-            }
-        }
+        // ... (diagnostic block unchanged)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
