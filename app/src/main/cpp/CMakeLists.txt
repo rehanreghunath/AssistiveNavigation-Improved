@@ -12,44 +12,34 @@ add_compile_options(
     -fvisibility=hidden
 )
 
-# ── OpenCV ─────────────────────────────────────────────────────────────────────
 find_package(OpenCV REQUIRED core imgproc video)
-
-# ── OpenAL-Soft ────────────────────────────────────────────────────────────────
 
 if(NOT DEFINED OPENAL_DIR)
     message(FATAL_ERROR
         "OPENAL_DIR is not set.\n"
-        "Add 'openal.dir=/path/to/openal-soft' to local.properties.\n"
-        "See CMakeLists.txt for build instructions.")
+        "Add 'openal.dir=/path/to/openal-soft' to local.properties.")
 endif()
 
-# Prebuilt OpenAL shared library
 add_library(openal SHARED IMPORTED)
 set_target_properties(openal PROPERTIES
     IMPORTED_LOCATION
-        "${OPENAL_DIR}/build-android/${ANDROID_ABI}/libopenal.so"
-)
+        "${OPENAL_DIR}/build-android/${ANDROID_ABI}/libopenal.so")
 
-# ── Native library ─────────────────────────────────────────────────────────────
-
-# 1. DEFINE TARGET FIRST
 add_library(assistivenav SHARED
     FlowEngine.cpp
-    GridAnalyzer.cpp
-    ImuFusion.cpp
-    AudioEngine.cpp
+    GridAnalyzer.cpp      # 3×3 per-cell danger metrics and FOE estimation
+    ImuFusion.cpp         # rotation-vector compensation
+    ObstacleTracker.cpp   # blob clustering and temporal obstacle tracking
+    AudioEngine.cpp       # OpenAL-Soft HRTF spatial audio
     jni_bridge.cpp
 )
 
-# 2. INCLUDE DIRECTORIES (AFTER TARGET EXISTS)
 target_include_directories(assistivenav PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${OPENAL_DIR}/include
 )
 
-# 3. LINK LIBRARIES
 target_link_libraries(assistivenav
     android
     log

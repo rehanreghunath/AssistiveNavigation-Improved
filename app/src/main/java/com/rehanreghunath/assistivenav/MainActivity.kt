@@ -142,6 +142,12 @@ class MainActivity : AppCompatActivity() {
         binding.start.setText(R.string.stop)
         binding.debugText.text = "Starting..."
         startCamera()
+        val audioManager = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        audioManager.requestAudioFocus(
+            null,
+            android.media.AudioManager.STREAM_MUSIC,
+            android.media.AudioManager.AUDIOFOCUS_GAIN
+        )
     }
 
     private fun stopPipeline() {
@@ -267,12 +273,23 @@ class MainActivity : AppCompatActivity() {
                     val tracked    = stats?.get(0)?.toInt() ?: 0
                     val total      = stats?.get(1)?.toInt() ?: 0
                     val fpsDisplay = smoothedFps.toInt()
+
+                    // Fetch grid result to verify the analysis pipeline is running
+                    // and to display the two primary danger cell scores on the HUD.
+                    // cells[4] = centre-middle, cells[7] = centre-bottom.
+                    val grid       = FlowBridge.nativeGetGridResult()
+                    val danger4    = grid?.get(4 * 5 + 2)  // dangerScore of cell 4
+                    val danger7    = grid?.get(7 * 5 + 2)  // dangerScore of cell 7
+                    val d4str      = if (danger4 != null) "%.2f".format(danger4) else "--"
+                    val d7str      = if (danger7 != null) "%.2f".format(danger7) else "--"
+
                     runOnUiThread {
                         if (isRunning) {
                             binding.flowView.setImageBitmap(bmp)
                             binding.flowView.visibility = android.view.View.VISIBLE
                             binding.debugText.text =
-                                "FPS: $fpsDisplay  |  Tracked: $tracked / $total"
+                                "FPS: $fpsDisplay  |  Tracked: $tracked / $total\n" +
+                                        "Danger  mid: $d4str  fwd: $d7str"
                         }
                     }
                 } else {
