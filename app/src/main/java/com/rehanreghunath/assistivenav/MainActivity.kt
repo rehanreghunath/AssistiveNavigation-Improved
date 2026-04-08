@@ -6,9 +6,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
+import android.util.SizeF
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -29,37 +32,14 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
-
-    // ── IMU ────────────────────────────────────────────────────────────────────
-    // SensorManager is a system service; we hold a reference so we can
-    // register and unregister cleanly with the activity lifecycle.
     private lateinit var sensorManager: SensorManager
-
-    // TYPE_ROTATION_VECTOR fuses accelerometer + gyroscope + magnetometer into
-    // a quaternion representing the device's absolute orientation.  It is more
-    // stable than raw gyroscope integration and requires no manual drift correction.
-    // Android guarantees this sensor exists on any device with an accelerometer
-    // and gyroscope; we check at runtime and degrade gracefully if absent.
     private var rotationSensor: Sensor? = null
 
-    // Delivers rotation-vector events to the native IMU fusion layer.
-    // Declared as a property so it can be unregistered by reference.
     private val rotationListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            // event.values for TYPE_ROTATION_VECTOR is always [x, y, z, w] (unit
-            // quaternion).  A 5th element (heading accuracy in radians) may be
-            // present on some devices; the native side ignores it.
-            // event.timestamp is nanoseconds of elapsed real time — the same
-            // time base as System.nanoTime(), which the camera pipeline also uses.
             FlowBridge.nativeUpdateImu(event.values, event.timestamp)
         }
-
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) {
-            // Accuracy changes (UNRELIABLE / LOW / MEDIUM / HIGH) are logged but
-            // we do not stop compensation on degraded accuracy.  Low accuracy means
-            // the heading estimate is off, but the short-term delta between two
-            // consecutive readings (which is all we use) remains reliable as long
-            // as the gyroscope hardware is working.
             Log.d(TAG, "Rotation sensor accuracy changed to $accuracy")
         }
     }
@@ -72,12 +52,7 @@ class MainActivity : AppCompatActivity() {
         private const val TAG              = "MainActivity"
         private const val REQUEST_CAMERA   = 100
         private const val HUD_UPDATE_EVERY = 10
-
-        // SENSOR_DELAY_GAME (~50 Hz) is the best balance between IMU data
-        // freshness and battery consumption for a 30 fps optical-flow pipeline.
-        // SENSOR_DELAY_FASTEST (~200 Hz) would deliver more data than the camera
-        // can consume and wastes CPU waking the sensor thread unnecessarily.
-        private const val IMU_DELAY = SensorManager.SENSOR_DELAY_GAME
+        private const val IMU_DELAY        = SensorManager.SENSOR_DELAY_GAME
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -95,9 +70,6 @@ class MainActivity : AppCompatActivity() {
         rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
         if (rotationSensor == null) {
-            // The device has no rotation-vector sensor.  The pipeline still works
-            // correctly — ImuFusion::compensate returns immediately when no sensor
-            // data has arrived, so flow vectors are used as-is without compensation.
             Log.w(TAG, "TYPE_ROTATION_VECTOR unavailable; IMU compensation disabled")
         }
 
@@ -106,8 +78,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-register the sensor whenever the activity becomes visible so that
-        // orientation data is fresh when the camera restarts.
         rotationSensor?.let {
             sensorManager.registerListener(rotationListener, it, IMU_DELAY)
         }
@@ -115,9 +85,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Unregister immediately when the activity is not visible.
-        // Leaving a sensor listener registered in the background drains the
-        // battery on every device, regardless of whether we're processing frames.
         sensorManager.unregisterListener(rotationListener)
     }
 
@@ -143,6 +110,7 @@ class MainActivity : AppCompatActivity() {
         binding.debugText.text = "Starting..."
         startCamera()
         val audioManager = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        @Suppress("DEPRECATION")
         audioManager.requestAudioFocus(
             null,
             android.media.AudioManager.STREAM_MUSIC,
@@ -163,6 +131,60 @@ class MainActivity : AppCompatActivity() {
             binding.start.setText(R.string.start)
             binding.debugText.setText(R.string.waiting)
             binding.flowView.visibility = android.view.View.INVISIBLE
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Focal length calibration  — issue 5
+    //
+    //  Reads the real physical focal length from CameraCharacteristics and
+    //  converts it to pixels using the known sensor size and image resolution.
+    //
+    //  Formula:
+    //    f_px = f_mm × (image_width_px / sensor_width_mm)
+    //
+    //  This is the standard "thin lens" approximation; it is exact for a
+    //  rectilinear (non-fisheye) lens with no distortion correction.
+    //  CameraX applies distortion correction by default on API 28+, so this
+    //  value is a very close approximation even without explicit undistortion.
+    //
+    //  Returns null if the characteristics cannot be read (emulator, no camera2
+    //  support).  In that case the native fallback of 500 px is used.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun computeFocalLengthPx(imageWidthPx: Int): Float? {
+        return try {
+            val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+
+            // Find the first back-facing logical camera, which is what CameraX
+            // selects via CameraSelector.DEFAULT_BACK_CAMERA.
+            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                cameraManager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+            } ?: return null
+
+            val chars = cameraManager.getCameraCharacteristics(cameraId)
+
+            // Physical focal length in millimetres.
+            // Index 0 is the only element on most phones (fixed focal length).
+            val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val fMm = focalLengths?.firstOrNull() ?: return null
+
+            // Physical sensor dimensions in millimetres.
+            val sensorSize: SizeF = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                ?: return null
+            val sensorWidthMm = sensorSize.width
+
+            // Convert to pixels.
+            val fPx = fMm * imageWidthPx.toFloat() / sensorWidthMm
+
+            Log.i(TAG, "Focal length: %.2f mm, sensor width: %.2f mm → %.1f px (at %d px wide)"
+                .format(fMm, sensorWidthMm, fPx, imageWidthPx))
+
+            fPx
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read focal length from CameraCharacteristics: ${e.message}")
+            null
         }
     }
 
@@ -241,6 +263,18 @@ class MainActivity : AppCompatActivity() {
 
                 if (!pipelineInitialized) {
                     FlowBridge.nativeInit(w, h)
+
+                    // ── Issue 5: pass real focal length before first frame ────
+                    // computeFocalLengthPx() accesses CameraCharacteristics on
+                    // the camera executor thread.  This is safe — it reads
+                    // read-only hardware metadata and is not UI work.
+                    val fPx = computeFocalLengthPx(w)
+                    if (fPx != null) {
+                        FlowBridge.nativeSetFocalLength(fPx)
+                    } else {
+                        Log.w(TAG, "Using native focal-length fallback (500 px)")
+                    }
+
                     val rotation = image.imageInfo.rotationDegrees
                     FlowBridge.nativeSetRenderRotation(rotation)
                     val (bmpW, bmpH) = if (rotation == 90 || rotation == 270) h to w else w to h
@@ -274,14 +308,11 @@ class MainActivity : AppCompatActivity() {
                     val total      = stats?.get(1)?.toInt() ?: 0
                     val fpsDisplay = smoothedFps.toInt()
 
-                    // Fetch grid result to verify the analysis pipeline is running
-                    // and to display the two primary danger cell scores on the HUD.
-                    // cells[4] = centre-middle, cells[7] = centre-bottom.
-                    val grid       = FlowBridge.nativeGetGridResult()
-                    val danger4    = grid?.get(4 * 5 + 2)  // dangerScore of cell 4
-                    val danger7    = grid?.get(7 * 5 + 2)  // dangerScore of cell 7
-                    val d4str      = if (danger4 != null) "%.2f".format(danger4) else "--"
-                    val d7str      = if (danger7 != null) "%.2f".format(danger7) else "--"
+                    val grid    = FlowBridge.nativeGetGridResult()
+                    val danger4 = grid?.get(4 * 5 + 2)   // dangerScore cell 4
+                    val danger7 = grid?.get(7 * 5 + 2)   // dangerScore cell 7
+                    val d4str   = if (danger4 != null) "%.2f".format(danger4) else "--"
+                    val d7str   = if (danger7 != null) "%.2f".format(danger7) else "--"
 
                     runOnUiThread {
                         if (isRunning) {

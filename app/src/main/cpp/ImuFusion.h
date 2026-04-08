@@ -20,13 +20,27 @@ namespace assistivenav {
     // a pure camera rotation would have caused, so only vectors caused by
     // independently moving objects (or forward translation) remain.
     //
+    // Issue 5 — Runtime focal length calibration:
+    //   The original code hardcoded kFocalLengthPx = 500 px, a rough estimate
+    //   for a 640×480 crop at ~65° HFOV.  A ±10% error in focal length
+    //   produces a ±10% residual in the rotation compensation — noticeable as
+    //   a ghost flow pattern on stationary scenes during head movement.
+    //
+    //   Kotlin now reads LENS_INFO_AVAILABLE_FOCAL_LENGTHS and
+    //   SENSOR_INFO_PHYSICAL_SIZE from CameraCharacteristics and calls
+    //   setFocalLength() once after nativeInit.  The formula is:
+    //
+    //     f_px = f_mm × (image_width_px / sensor_width_mm)
+    //
+    //   If CameraCharacteristics is unavailable (emulator, unit tests), the
+    //   hardcoded fallback kFallbackFocalLengthPx = 500 is used automatically.
+    //
     // Thread-safety contract:
     //   updateRotation() is called from the Android sensor thread.
     //   compensate()     is called from the camera executor thread.
-    //   The two share no mutable state — updateRotation writes to an atomic
-    //   slot and compensate reads from it with a relaxed load.  No mutex
-    //   needed; a slightly stale quaternion (one sensor sample old) has no
-    //   perceptible effect on a 30 fps pipeline.
+    //   setFocalLength() is called once from the main thread before the first
+    //                    camera frame, so no lock is needed — the caller must
+    //                    ensure it races no camera frames.
     // ─────────────────────────────────────────────────────────────────────────
 
     class ImuFusion {
@@ -36,6 +50,12 @@ namespace assistivenav {
         ~ImuFusion() = default;
         ImuFusion(const ImuFusion&)            = delete;
         ImuFusion& operator=(const ImuFusion&) = delete;
+
+        /** Override the focal length used for the rotation homography.
+         *  Call once from the main thread after nativeInit and before the first
+         *  camera frame arrives.  f_px = f_mm × (image_width_px / sensor_width_mm).
+         *  Values outside [100, 5000] are ignored as implausible. */
+        void setFocalLength(float focalLengthPx);
 
         /** Store the latest device orientation quaternion [x, y, z, w].
          *  Called from the sensor thread; must be non-blocking. */
@@ -47,46 +67,39 @@ namespace assistivenav {
          *  Called from the camera executor thread. */
         void compensate(FlowResult& result);
 
+        /** Return the focal length currently in use (pixels). */
+        float focalLengthPx() const { return mFocalLengthPx; }
+
     private:
         const int mWidth;
         const int mHeight;
 
-        // Approximate camera intrinsics.
-        // Mobile rear cameras at 640×480 typically have a horizontal FOV of
-        // 60–70°.  f = w / (2·tan(FOV/2)).  At 65° → f ≈ 512.  We use 500
-        // as a round number; a ±10 % error here produces only a ±10 % residual
-        // in the compensation, which is acceptable without full calibration.
-        static constexpr float kFocalLengthPx = 500.0f;
+        // Fallback focal length used until setFocalLength() is called.
+        // Mobile rear cameras at 640×480 at ~65° HFOV → f ≈ 500 px.
+        static constexpr float kFallbackFocalLengthPx = 500.0f;
 
-        // A POD quaternion small enough to fit in two cache lines and simple
-        // enough to copy without a mutex.
+        // Plausibility guard for setFocalLength().
+        static constexpr float kMinPlausibleFx = 100.0f;
+        static constexpr float kMaxPlausibleFx = 5000.0f;
+
+        float mFocalLengthPx;   // set by setFocalLength(); fallback until then
+
         struct Quaternion {
             float x, y, z, w;
         };
 
-        // Two-slot "seqlock-lite": the camera thread always reads slot[readIdx],
-        // the sensor thread always writes slot[1 - readIdx] then flips the index.
-        // In practice a simple flag is fine here because one stale frame is
-        // imperceptible, but the two-slot design makes the intent explicit.
         Quaternion           mSlot[2];
-        std::atomic<int>     mReadIdx;   // which slot the camera thread should read
-        std::atomic<bool>    mHasData;   // false until the first sensor event arrives
+        std::atomic<int>     mReadIdx;
+        std::atomic<bool>    mHasData;
 
         int64_t              mPrevTimestampNs;
         Quaternion           mPrevQuat;
         bool                 mHasPrev;
 
-        /** Multiply two quaternions: result = a * b. */
         static Quaternion multiplyQuat(const Quaternion& a, const Quaternion& b);
-
-        /** Conjugate (= inverse for a unit quaternion): flip the vector part. */
         static Quaternion conjugateQuat(const Quaternion& q);
+        static void       quatToRotMat(const Quaternion& q, float out[9]);
 
-        /** Convert a unit quaternion to a 3×3 rotation matrix stored row-major. */
-        static void quatToRotMat(const Quaternion& q, float out[9]);
-
-        /** Apply homography H = K·R·K⁻¹ to point (px,py) and return the
-         *  predicted displacement. */
         void predictedDisplacement(const float H[9],
                                    float px, float py,
                                    float cx, float cy,

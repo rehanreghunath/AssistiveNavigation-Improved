@@ -13,26 +13,24 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static std::unique_ptr<assistivenav::FlowEngine>     gPipeline;
-static std::unique_ptr<assistivenav::GridAnalyzer>   gGridAnalyzer;
-static std::unique_ptr<assistivenav::ImuFusion>      gImuFusion;
+static std::unique_ptr<assistivenav::FlowEngine>      gPipeline;
+static std::unique_ptr<assistivenav::GridAnalyzer>    gGridAnalyzer;
+static std::unique_ptr<assistivenav::ImuFusion>       gImuFusion;
 static std::unique_ptr<assistivenav::ObstacleTracker> gObstacleTracker;
-static std::unique_ptr<assistivenav::AudioEngine>    gAudioEngine;
-static std::unique_ptr<assistivenav::FlowResult>     gLastResult;
-static std::unique_ptr<assistivenav::GridResult>     gLastGridResult;
-static std::unique_ptr<assistivenav::FlowClassifier> gFlowClassifier;
+static std::unique_ptr<assistivenav::AudioEngine>     gAudioEngine;
+static std::unique_ptr<assistivenav::FlowResult>      gLastResult;
+static std::unique_ptr<assistivenav::GridResult>      gLastGridResult;
+static std::unique_ptr<assistivenav::FlowClassifier>  gFlowClassifier;
 
 static std::mutex gPipelineMutex;
 
-// ── nativeGetGridResult layout (unchanged) ────────────────────────────────────
-static constexpr int kGridResultFloats = 9 * 5 + 3; // 48
+static constexpr int kGridResultFloats = 9 * 5 + 3;  // 48
 
 extern "C" {
 
 JNIEXPORT void JNICALL
 Java_com_rehanreghunath_assistivenav_FlowBridge_nativeInit(
-        JNIEnv* /*env*/, jobject /*thiz*/,
-        jint width, jint height) {
+        JNIEnv* /*env*/, jobject /*thiz*/, jint width, jint height) {
     std::lock_guard<std::mutex> lock(gPipelineMutex);
 
     gPipeline        = std::make_unique<assistivenav::FlowEngine>(
@@ -44,13 +42,19 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeInit(
     gObstacleTracker = std::make_unique<assistivenav::ObstacleTracker>(
             static_cast<int>(width), static_cast<int>(height));
     gAudioEngine     = std::make_unique<assistivenav::AudioEngine>();
-    gFlowClassifier = std::make_unique<assistivenav::FlowClassifier>();
+    gFlowClassifier  = std::make_unique<assistivenav::FlowClassifier>();
 
     if (!gAudioEngine->isReady()) {
         LOGE("AudioEngine init failed — continuing without audio");
     }
-
     LOGI("All subsystems init %dx%d", (int)width, (int)height);
+}
+
+JNIEXPORT void JNICALL
+Java_com_rehanreghunath_assistivenav_FlowBridge_nativeSetFocalLength(
+        JNIEnv* /*env*/, jobject /*thiz*/, jfloat focalLengthPx) {
+    std::lock_guard<std::mutex> lock(gPipelineMutex);
+    if (gImuFusion) gImuFusion->setFocalLength(static_cast<float>(focalLengthPx));
 }
 
 JNIEXPORT void JNICALL
@@ -60,30 +64,34 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeUpdateImu(
     if (!quaternion) return;
     const jsize len = env->GetArrayLength(quaternion);
     if (len < 4) return;
-
     jfloat q[5] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     env->GetFloatArrayRegion(quaternion, 0, std::min(len, static_cast<jsize>(5)), q);
-
     std::lock_guard<std::mutex> lock(gPipelineMutex);
-    if (gImuFusion) {
+    if (gImuFusion)
         gImuFusion->updateRotation(q[0], q[1], q[2], q[3],
                                    static_cast<int64_t>(timestampNs));
-    }
 }
 
 // ── Full pipeline ─────────────────────────────────────────────────────────────
-//   1. FlowEngine::processFrame    → raw LK flow
-//   2. ImuFusion::compensate       → remove camera-rotation displacement
-//   3. GridAnalyzer::analyze       → 3×3 danger grid (HUD / Kotlin)
-//   4. ObstacleTracker::update     → temporally stable obstacle list
-//   5. AudioEngine::update         → spatial audio from obstacle positions
+//  Audio path change: AudioEngine::updateFromGrid(gridResult) replaces the
+//  broken AudioEngine::update(ObstacleFrame) path.
+//
+//  Old path:  FlowEngine → ImuFusion → GridAnalyzer → FlowClassifier
+//             → ObstacleTracker → AudioEngine::update(obstacles)
+//             [BROKEN: anomaly score = 0 for forward approach; grid ignored]
+//
+//  New path:  FlowEngine → ImuFusion → GridAnalyzer
+//             → AudioEngine::updateFromGrid(grid)
+//             [FIXED: dangerScore is magnitude-based; symmetric for approach
+//              and retreat; grid centre column directly drives audio]
+//
+//  ObstacleTracker and FlowClassifier still run so their output is available
+//  for future HUD/haptic use, but they no longer gate audio.
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_rehanreghunath_assistivenav_FlowBridge_nativeProcessFrame(
         JNIEnv* env, jobject /*thiz*/,
-        jbyteArray yPlane,
-        jint width, jint height, jint rowStride,
-        jlong timestampNs) {
+        jbyteArray yPlane, jint width, jint height, jint rowStride, jlong timestampNs) {
 
     std::lock_guard<std::mutex> lock(gPipelineMutex);
     if (!gPipeline) { LOGE("processFrame before init"); return nullptr; }
@@ -99,30 +107,36 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeProcessFrame(
     env->ReleaseByteArrayElements(yPlane, yData, JNI_ABORT);
 
     if (!result.isFirstFrame) {
+        // Step 1: IMU rotation compensation.
         if (gImuFusion) gImuFusion->compensate(result);
 
-        // Run grid analysis first so the current-frame FOE is available
-        // for the classifier.  GridAnalyzer uses all vectors before they are
-        // tagged; the FOE estimate is dominated by the background majority and
-        // is robust to a small number of obstacle vectors.
+        // Step 2: Grid analysis (RANSAC FOE + temporal baseline).
+        // Non-const — mutates EMA state.
         assistivenav::GridResult gridResult{};
         if (gGridAnalyzer) {
             gridResult      = gGridAnalyzer->analyze(result);
             gLastGridResult = std::make_unique<assistivenav::GridResult>(gridResult);
         }
 
-        // Tag each vector with an anomalyScore using the just-computed FOE.
+        // Step 3: Spatial audio directly from the grid.
+        // This is the fix: no anomaly classifier, no obstacle tracker in the
+        // audio path.  dangerScore is magnitude-based and fires symmetrically
+        // for both approach and retreat.
+        if (gAudioEngine) {
+            gAudioEngine->updateFromGrid(gridResult);
+        }
+
+        // Step 4: Anomaly classification (still runs; output available for HUD).
         if (gFlowClassifier) {
             gFlowClassifier->classify(result, gridResult,
                                       static_cast<int>(width),
                                       static_cast<int>(height));
         }
 
-        // ObstacleTracker and AudioEngine operate only on the classified vectors.
-        if (gObstacleTracker && gAudioEngine) {
-            const assistivenav::ObstacleFrame obstacles =
-                    gObstacleTracker->update(result, gridResult);
-            gAudioEngine->update(obstacles);
+        // Step 5: ObstacleTracker still runs for future use (haptics, display
+        // overlay).  Its output no longer affects audio.
+        if (gObstacleTracker) {
+            gObstacleTracker->update(result, gridResult);
         }
     }
 
@@ -143,13 +157,11 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeGetRgbaFrame(
         JNIEnv* env, jobject /*thiz*/) {
     std::lock_guard<std::mutex> lock(gPipelineMutex);
     if (!gPipeline || !gLastResult) return nullptr;
-
     const std::vector<uint8_t> rgba = gPipeline->renderToRgba(*gLastResult);
     jbyteArray out = env->NewByteArray(static_cast<jsize>(rgba.size()));
-    if (out) {
+    if (out)
         env->SetByteArrayRegion(out, 0, static_cast<jsize>(rgba.size()),
                                 reinterpret_cast<const jbyte*>(rgba.data()));
-    }
     return out;
 }
 
@@ -197,7 +209,6 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeDestroy(
     gPipeline.reset();
     gLastResult.reset();
     gLastGridResult.reset();
-
     LOGI("All native resources destroyed");
 }
 

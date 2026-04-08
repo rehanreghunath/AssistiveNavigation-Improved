@@ -6,8 +6,30 @@ object FlowBridge {
     }
 
     /** Create the C++ FlowEngine, GridAnalyzer, and ImuFusion.
-     *  Call once when the camera resolution is known. */
+     *  Call once when the camera resolution is known.
+     *  After this returns, call [nativeSetFocalLength] with the real lens data
+     *  before the first camera frame is submitted. */
     external fun nativeInit(width: Int, height: Int)
+
+    // ── Issue 5: runtime focal length calibration ──────────────────────────
+    /**
+     * Override the focal length used for IMU rotation compensation.
+     *
+     * The default fallback (500 px) is a rough estimate for 640×480 at ~65° HFOV.
+     * Providing the real value eliminates the systematic residual flow visible on
+     * stationary scenes during head movement.
+     *
+     * Compute it from [android.hardware.camera2.CameraCharacteristics]:
+     *   val fMm   = characteristics.get(LENS_INFO_AVAILABLE_FOCAL_LENGTHS)!![0]
+     *   val sizeW = characteristics.get(SENSOR_INFO_PHYSICAL_SIZE)!!.width   // mm
+     *   val fPx   = fMm * (imageWidthPx / sizeW)
+     *
+     * Call once from the main thread after [nativeInit] and before the first
+     * camera frame.  Values outside [100, 5000] px are silently ignored.
+     *
+     * @param focalLengthPx  f_mm × (image_width_px / sensor_width_mm)
+     */
+    external fun nativeSetFocalLength(focalLengthPx: Float)
 
     /**
      * Deliver a rotation-vector sensor event to the IMU fusion layer.
@@ -46,14 +68,14 @@ object FlowBridge {
     /**
      * Returns per-cell grid analysis for the last processed frame (IMU-compensated).
      *
-     * Layout — 48 floats flat:
+     * Layout — 48 floats flat (unchanged):
      *   Indices 0..44 — 9 cells × 5 floats, row-major [0]=top-left [8]=bottom-right
      *     [base+0]  meanMag      (px/frame)
      *     [base+1]  meanAngle    (radians, −π..π)
-     *     [base+2]  dangerScore  (0..1)
+     *     [base+2]  dangerScore  (0..1) — now includes temporal-anomaly boost (issue 2)
      *     [base+3]  ttc          (frames; 0 = no motion)
      *     [base+4]  sampleCount  (cast to float)
-     *   Index 45 — foeX      (normalised 0..1)
+     *   Index 45 — foeX      (normalised 0..1) — now RANSAC-estimated (issue 1)
      *   Index 46 — foeY      (normalised 0..1)
      *   Index 47 — foeValid  (1.0 = valid, 0.0 = not available)
      *
