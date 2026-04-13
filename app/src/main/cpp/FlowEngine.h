@@ -63,6 +63,7 @@ namespace assistivenav {
         static constexpr float kGFTTQuality      = 0.01f;
         static constexpr float kGFTTMinDist      = 15.0f;
         static constexpr int   kGFTTBlockSize    = 7;
+        static constexpr float kMinFlowMag = 0.8f;
 
         static void preprocessFrame(const cv::Mat& raw, cv::Mat& out);
         void detectFeatures();

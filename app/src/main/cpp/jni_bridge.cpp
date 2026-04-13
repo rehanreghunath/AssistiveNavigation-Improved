@@ -127,17 +127,17 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeProcessFrame(
         }
 
         // Step 4: Anomaly classification (still runs; output available for HUD).
-        if (gFlowClassifier) {
-            gFlowClassifier->classify(result, gridResult,
-                                      static_cast<int>(width),
-                                      static_cast<int>(height));
-        }
+//        if (gFlowClassifier) {
+//            gFlowClassifier->classify(result, gridResult,
+//                                      static_cast<int>(width),
+//                                      static_cast<int>(height));
+//        }
 
         // Step 5: ObstacleTracker still runs for future use (haptics, display
         // overlay).  Its output no longer affects audio.
-        if (gObstacleTracker) {
-            gObstacleTracker->update(result, gridResult);
-        }
+//        if (gObstacleTracker) {
+//            gObstacleTracker->update(result, gridResult);
+//        }
     }
 
     gLastResult = std::make_unique<assistivenav::FlowResult>(result);

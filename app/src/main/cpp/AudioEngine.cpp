@@ -18,7 +18,7 @@ namespace assistivenav {
 
     AudioEngine::AudioEngine()
             : mDevice(nullptr), mContext(nullptr), mNoiseBuffer(0),
-              mSources{}, mSmoothedGain{}, mSmoothedPitch{},
+              mSources{}, mSmoothedGain{}, mSmoothedPitch{}, mSmoothedY{},
               mReady(false), mDiagFrames(0)
     {
         for (float& p : mSmoothedPitch) p = 1.0f;
@@ -29,7 +29,7 @@ namespace assistivenav {
     AudioEngine::~AudioEngine() { shutdownOpenAL(); }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  initOpenAL
+    //  initOpenAL  (unchanged from prior version)
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::initOpenAL() {
@@ -75,7 +75,7 @@ namespace assistivenav {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  generateNoiseBuffer
+    //  generateNoiseBuffer  (unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::generateNoiseBuffer() {
@@ -99,184 +99,168 @@ namespace assistivenav {
 
     // ─────────────────────────────────────────────────────────────────────────
     //  initSources
+    //
+    //  Two sources, both started at gain=0 to eliminate per-detection
+    //  startup latency.  Initial Y is 0 (chest height); updateFromGrid()
+    //  will begin tracking the correct height once flow data arrives.
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::initSources() {
         alGenSources(kNumSources, mSources.data());
         const ALboolean hasSpatialise = alIsExtensionPresent("AL_SOFT_source_spatialize");
 
-        // Sources 0-2: centre column (cells 1, 4, 7), stacked vertically.
-        for (int row = 0; row < 3; ++row) {
-            const ALuint src = mSources[row];
-            alSourcei (src, AL_BUFFER,         static_cast<ALint>(mNoiseBuffer));
-            alSourcei (src, AL_LOOPING,        AL_TRUE);
-            alSourcef (src, AL_GAIN,           0.0f);
-            alSourcef (src, AL_PITCH,          1.0f);
-            alSourcef (src, AL_ROLLOFF_FACTOR, 0.0f);
-            alSource3f(src, AL_POSITION,       0.0f, kRowY[row], kSourceDepth);
-            alSource3f(src, AL_VELOCITY,       0.0f, 0.0f, 0.0f);
-            if (hasSpatialise) alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, AL_TRUE);
-            mSmoothedGain[row]  = 0.0f;
-            mSmoothedPitch[row] = 1.0f;
-        }
+        const float panX[kNumSources] = { -kSideX, kSideX };
 
-        // Source 3: side warning — starts centred, panned at runtime.
-        {
-            const ALuint src = mSources[3];
+        for (int i = 0; i < kNumSources; ++i) {
+            const ALuint src = mSources[i];
             alSourcei (src, AL_BUFFER,         static_cast<ALint>(mNoiseBuffer));
             alSourcei (src, AL_LOOPING,        AL_TRUE);
             alSourcef (src, AL_GAIN,           0.0f);
             alSourcef (src, AL_PITCH,          1.0f);
             alSourcef (src, AL_ROLLOFF_FACTOR, 0.0f);
-            alSource3f(src, AL_POSITION,       0.0f, 0.0f, kSourceDepth);
+            alSource3f(src, AL_POSITION,       panX[i], 0.0f, kSourceDepth);
             alSource3f(src, AL_VELOCITY,       0.0f, 0.0f, 0.0f);
             if (hasSpatialise) alSourcei(src, AL_SOURCE_SPATIALIZE_SOFT, AL_TRUE);
-            mSmoothedGain[3]  = 0.0f;
-            mSmoothedPitch[3] = 1.0f;
+            mSmoothedGain[i]  = 0.0f;
+            mSmoothedPitch[i] = 1.0f;
+            mSmoothedY[i]     = 0.0f;
         }
 
         alSourcePlayv(kNumSources, mSources.data());
         const ALenum err = alGetError();
         if (err != AL_NO_ERROR) LOGE("Source init: 0x%x", err);
-        else LOGI("%d sources started silent", kNumSources);
+        else LOGI("%d sources started silent (left / right)", kNumSources);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  updateFromGrid — the redesigned audio path
+    //  updateFromGrid
     //
-    //  Grid layout (portrait, 3×3):
-    //    col:  0     1     2
-    //    row 0: [0]  [1]  [2]   head level
-    //    row 1: [3]  [4]  [5]   chest level
-    //    row 2: [6]  [7]  [8]   floor level
+    //  For each centre-column cell (1, 4, 7 in landscape):
     //
-    //  Source mapping (centre column only for forward path):
-    //    src 0 ← cell 1 (top-centre)
-    //    src 1 ← cell 4 (mid-centre)   ← primary danger
-    //    src 2 ← cell 7 (bot-centre)   ← primary danger
-    //    src 3 ← side warning (left/right columns when hotter than centre)
+    //    lateral = cos(meanAngle)
+    //      > 0  →  flow is moving toward the right column
+    //      < 0  →  flow is moving toward the left column
     //
-    //  Why this fixes approach=silent / retreat=loud:
-    //    dangerScore is derived from meanMag which is the RMS of optical flow
-    //    magnitude.  Flow magnitude rises whether the camera moves toward OR
-    //    away from an object.  The old anomaly-based path failed for approach
-    //    because approach = radially outward flow = anomaly ≈ 0.
-    //    Here there is NO anomaly classifier in the audio path at all.
+    //  A cell only contributes if:
+    //    • |lateral| > kLateralThresh  (not mostly vertical)
+    //    • sampleCount >= kMinSamples  (enough vectors for a reliable angle)
     //
-    //  TTC → pitch:
-    //    Low TTC (imminent) → high pitch.  Large/zero TTC → low pitch.
-    //    Gives a natural "beeping faster as you get closer" feel without
-    //    requiring the user to judge gain level consciously.
+    //  lateralStrength (per side) is the sum of (lateralComponent * dangerScore)
+    //  across contributing cells.  dangerScore is already magnitude-based, so
+    //  strength is non-zero only when real flow is present.
+    //
+    //  The vertical position of each source tracks the weighted centroid of
+    //  which rows are contributing; a person walking past at head height sounds
+    //  different from an obstacle at floor level.
+    //
+    //  Pitch is modulated by the TTC of the dominant contributing cell so the
+    //  user gets a natural "faster as it gets closer" feel.
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::updateFromGrid(const GridResult& grid) {
         if (!mReady) return;
 
-        // Centre column cell indices for portrait mode.
+        // Landscape centre-column cells: 1 (top), 4 (mid), 7 (bot).
         static constexpr int kCentreCells[3] = {1, 4, 7};
 
-        // ── Centre column sources (forward path) ──────────────────────────────
-        for (int srcIdx = 0; srcIdx < 3; ++srcIdx) {
-            const CellMetrics& cell = grid.cells[kCentreCells[srcIdx]];
-            const ALuint src = mSources[srcIdx];
+        // Per-side accumulators.
+        float leftStrength  = 0.0f, leftSumY  = 0.0f, leftTTC  = 0.0f;
+        float rightStrength = 0.0f, rightSumY = 0.0f, rightTTC = 0.0f;
+        // Track which single cell is the largest contributor so its TTC
+        // drives pitch — a weighted average of TTC is less meaningful.
+        float leftBest  = 0.0f;
+        float rightBest = 0.0f;
 
-            // Gain: linear ramp from kMinDanger→kFullDanger mapped to 0→kMasterGain.
-            const float danger = cell.dangerScore;
-            const float targetGain = (danger < kMinDanger)
+        for (int r = 0; r < 3; ++r) {
+            const CellMetrics& cell = grid.cells[kCentreCells[r]];
+
+            // Not enough vectors to trust the mean angle estimate.
+            if (cell.sampleCount < kMinSamples) continue;
+
+            // cos(meanAngle): +1 = pure rightward flow, -1 = pure leftward.
+            const float lateral   = std::cos(cell.meanAngle);
+            const float leftComp  = std::max(0.0f, -lateral);
+            const float rightComp = std::max(0.0f,  lateral);
+
+            // kLateralThresh filters cells where flow is primarily vertical.
+            // For a wall approached straight-on, centre-column angles are
+            // near ±π/2 (up/down) → cos ≈ 0 → neither side fires.
+            if (leftComp > kLateralThresh) {
+                const float s = leftComp * cell.dangerScore;
+                leftStrength  += s;
+                leftSumY      += kRowY[r] * s;
+                if (s > leftBest) { leftBest = s; leftTTC = cell.ttc; }
+            }
+            if (rightComp > kLateralThresh) {
+                const float s = rightComp * cell.dangerScore;
+                rightStrength  += s;
+                rightSumY      += kRowY[r] * s;
+                if (s > rightBest) { rightBest = s; rightTTC = cell.ttc; }
+            }
+        }
+
+        // Weighted centroid Y; fall back to current smoothed value if no signal
+        // so the source drifts back to neutral rather than snapping.
+        const float targetY[kNumSources] = {
+                leftStrength  > 1e-6f ? leftSumY  / leftStrength  : mSmoothedY[0],
+                rightStrength > 1e-6f ? rightSumY / rightStrength : mSmoothedY[1]
+        };
+        const float strengths[kNumSources] = { leftStrength,  rightStrength  };
+        const float ttcs     [kNumSources] = { leftTTC,       rightTTC       };
+        const float panX     [kNumSources] = { -kSideX,       kSideX         };
+
+        for (int s = 0; s < kNumSources; ++s) {
+            const ALuint src = mSources[s];
+
+            // ── Gain ──────────────────────────────────────────────────────────
+            const float targetGain = (strengths[s] < kMinLateral)
                                      ? 0.0f
-                                     : std::clamp((danger - kMinDanger) / (kFullDanger - kMinDanger),
+                                     : std::clamp((strengths[s] - kMinLateral) / (kFullLateral - kMinLateral),
                                                   0.0f, 1.0f) * kMasterGain;
 
-            mSmoothedGain[srcIdx] = kGainAlpha * targetGain
-                                    + (1.0f - kGainAlpha) * mSmoothedGain[srcIdx];
-            alSourcef(src, AL_GAIN, mSmoothedGain[srcIdx]);
+            mSmoothedGain[s] = kGainAlpha * targetGain
+                               + (1.0f - kGainAlpha) * mSmoothedGain[s];
+            alSourcef(src, AL_GAIN, mSmoothedGain[s]);
 
-            // Pitch: inversely proportional to TTC.
-            // TTC=0 (no motion detected) → neutral low pitch.
-            // TTC≤kMinTTCForHighPitch    → kPitchHigh (imminent).
-            // TTC≥kMaxTTCForPitch        → kPitchLow  (distant / slow).
+            // ── Vertical position ─────────────────────────────────────────────
+            mSmoothedY[s] = kYAlpha * targetY[s]
+                            + (1.0f - kYAlpha) * mSmoothedY[s];
+            alSource3f(src, AL_POSITION, panX[s], mSmoothedY[s], kSourceDepth);
+
+            // ── Pitch ─────────────────────────────────────────────────────────
             float targetPitch = kPitchLow;
-            if (cell.ttc > 0.0f) {
-                // t=1 when TTC=kMinTTCForHighPitch, t=0 when TTC=kMaxTTCForPitch.
+            if (ttcs[s] > 0.0f) {
                 const float t = 1.0f - std::clamp(
-                        (cell.ttc - kMinTTCForHighPitch) /
+                        (ttcs[s] - kMinTTCForHighPitch) /
                         (kMaxTTCForPitch - kMinTTCForHighPitch),
                         0.0f, 1.0f);
                 targetPitch = kPitchLow + t * (kPitchHigh - kPitchLow);
             }
+            mSmoothedPitch[s] = kPitchAlpha * targetPitch
+                                + (1.0f - kPitchAlpha) * mSmoothedPitch[s];
 
-            mSmoothedPitch[srcIdx] = kPitchAlpha * targetPitch
-                                     + (1.0f - kPitchAlpha) * mSmoothedPitch[srcIdx];
-
-            // Apply pitch only when the source is audible; avoids a click on
-            // first activation from a stale pitch value.
-            if (mSmoothedGain[srcIdx] > 0.01f) {
-                alSourcef(src, AL_PITCH, mSmoothedPitch[srcIdx]);
+            // Only update pitch when audible to avoid a click on first activation
+            // from a stale pitch value left over from the previous session.
+            if (mSmoothedGain[s] > 0.01f) {
+                alSourcef(src, AL_PITCH, mSmoothedPitch[s]);
             }
-        }
-
-        // ── Side-warning source ───────────────────────────────────────────────
-        // Fires when a peripheral column is meaningfully hotter than the
-        // centre cell in the same row.  Warns of doorframes, poles, and walls
-        // on one side without masking the forward path signal.
-        static constexpr int kLeftCells[3]  = {0, 3, 6};
-        static constexpr int kRightCells[3] = {2, 5, 8};
-
-        // How much hotter (in dangerScore) the side must be vs the same-row
-        // centre cell before the side warning fires.
-        static constexpr float kSideDangerMargin = 0.10f;
-
-        float bestSideDanger = 0.0f;
-        float sidePanX = 0.0f;
-
-        for (int row = 0; row < 3; ++row) {
-            const float leftD   = grid.cells[kLeftCells[row]].dangerScore;
-            const float rightD  = grid.cells[kRightCells[row]].dangerScore;
-            const float centreD = grid.cells[kCentreCells[row]].dangerScore;
-            const float maxSide = std::max(leftD, rightD);
-
-            // Side must beat both centre AND the current best side candidate.
-            if (maxSide > centreD + kSideDangerMargin && maxSide > bestSideDanger) {
-                bestSideDanger = maxSide;
-                // Negative X = left, positive X = right.
-                sidePanX = (leftD >= rightD) ? -kSideX : kSideX;
-            }
-        }
-
-        const ALuint sideSrc = mSources[3];
-        const float sideTargetGain = (bestSideDanger < kMinDanger)
-                                     ? 0.0f
-                                     : std::clamp((bestSideDanger - kMinDanger) / (kFullDanger - kMinDanger),
-                                                  0.0f, 1.0f) * kSideGain;
-
-        mSmoothedGain[3] = kGainAlpha * sideTargetGain
-                           + (1.0f - kGainAlpha) * mSmoothedGain[3];
-        alSourcef(sideSrc, AL_GAIN, mSmoothedGain[3]);
-
-        // Reposition when contributing — use chest-height row.
-        if (bestSideDanger >= kMinDanger) {
-            alSource3f(sideSrc, AL_POSITION, sidePanX, kRowY[1], kSourceDepth);
         }
 
         // ── Diagnostics (every ~3 s at 30 fps) ───────────────────────────────
         if (++mDiagFrames >= 90) {
             mDiagFrames = 0;
-            LOGI("Grid audio | "
-                 "top(c1) d=%.2f g=%.3f p=%.2f | "
-                 "mid(c4) d=%.2f g=%.3f p=%.2f | "
-                 "bot(c7) d=%.2f g=%.3f p=%.2f | "
-                 "side g=%.3f",
-                 grid.cells[1].dangerScore, mSmoothedGain[0], mSmoothedPitch[0],
-                 grid.cells[4].dangerScore, mSmoothedGain[1], mSmoothedPitch[1],
-                 grid.cells[7].dangerScore, mSmoothedGain[2], mSmoothedPitch[2],
-                 mSmoothedGain[3]);
+            LOGI("Lateral audio | "
+                 "left  str=%.2f g=%.3f p=%.2f y=%.2f | "
+                 "right str=%.2f g=%.3f p=%.2f y=%.2f",
+                 leftStrength,  mSmoothedGain[0], mSmoothedPitch[0], mSmoothedY[0],
+                 rightStrength, mSmoothedGain[1], mSmoothedPitch[1], mSmoothedY[1]);
             const ALenum alErr = alGetError();
             if (alErr != AL_NO_ERROR) LOGE("OpenAL error: 0x%x", alErr);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  shutdownOpenAL
+    //  shutdownOpenAL  (unchanged except kNumSources is now 2)
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::shutdownOpenAL() {
