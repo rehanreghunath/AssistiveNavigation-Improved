@@ -10,8 +10,6 @@
 
 namespace assistivenav {
 
-    constexpr float AudioEngine::kRowY[3];
-
     // ─────────────────────────────────────────────────────────────────────────
     //  Constructor / Destructor
     // ─────────────────────────────────────────────────────────────────────────
@@ -29,7 +27,7 @@ namespace assistivenav {
     AudioEngine::~AudioEngine() { shutdownOpenAL(); }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  initOpenAL  (unchanged from prior version)
+    //  initOpenAL  (unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::initOpenAL() {
@@ -98,10 +96,10 @@ namespace assistivenav {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  initSources
+    //  initSources  (unchanged)
     //
     //  Two sources, both started at gain=0 to eliminate per-detection
-    //  startup latency.  Initial Y is 0 (chest height); updateFromGrid()
+    //  startup latency.  Initial Y is 0 (chest height); updateFromObstacles()
     //  will begin tracking the correct height once flow data arrives.
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -133,92 +131,114 @@ namespace assistivenav {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  updateFromGrid
+    //  updateFromObstacles
     //
-    //  For each centre-column cell (1, 4, 7 in landscape):
+    //  PANNING APPROACH — normX, not flow direction:
     //
-    //    lateral = cos(meanAngle)
-    //      > 0  →  flow is moving toward the right column
-    //      < 0  →  flow is moving toward the left column
+    //    Left weight  = (1 − normX):  1.0 at far left,  0.0 at far right
+    //    Right weight = normX:         0.0 at far left,  1.0 at far right
     //
-    //  A cell only contributes if:
-    //    • |lateral| > kLateralThresh  (not mostly vertical)
-    //    • sampleCount >= kMinSamples  (enough vectors for a reliable angle)
+    //    Both weights are 0.5 when normX = 0.5 (obstacle directly ahead),
+    //    so a forward obstacle fires both ears at equal gain — the correct
+    //    HRTF percept for a hazard straight ahead.
     //
-    //  lateralStrength (per side) is the sum of (lateralComponent * dangerScore)
-    //  across contributing cells.  dangerScore is already magnitude-based, so
-    //  strength is non-zero only when real flow is present.
+    //    This is immune to flow-direction inversion from head/body rotation
+    //    because normX is the obstacle's position in the frame, not the
+    //    direction its pixels happen to be moving.
     //
-    //  The vertical position of each source tracks the weighted centroid of
-    //  which rows are contributing; a person walking past at head height sounds
-    //  different from an obstacle at floor level.
+    //  SUPPRESSION FACTOR:
     //
-    //  Pitch is modulated by the TTC of the dominant contributing cell so the
-    //  user gets a natural "faster as it gets closer" feel.
+    //    All target gains are multiplied by suppressionFactor before EMA.
+    //    Factor = 1 during normal walking micro-sway; approaches 0 during
+    //    fast head rotation.  The EMA then fades gain smoothly rather than
+    //    cutting abruptly.
+    //
+    //  VERTICAL POSITION:
+    //
+    //    normY = 0 → top of frame (head height) → alY = +0.5
+    //    normY = 0.5 → centre (chest)           → alY =  0.0
+    //    normY = 1 → bottom of frame (floor)    → alY = −0.5
+    //    Formula:  alY = 0.5 − normY
+    //
+    //    Each source's Y is EMA-tracked independently so the percept drifts
+    //    smoothly as the obstacle moves vertically.
+    //
+    //  MULTIPLE OBSTACLES:
+    //
+    //    Iterate all active obstacles.  For each side, track the maximum
+    //    weighted confidence seen (dominant obstacle) and its Y and pitch.
+    //    Using max rather than sum prevents gain from being additive across
+    //    many detections — a cluster of near-zero-confidence ghosts should
+    //    not add up to a loud trigger.
+    //
+    //  PITCH:
+    //
+    //    Derived from obstacle.smoothedMag (anomaly-weighted px/frame).
+    //    Higher values correlate with either faster approach or closer range.
+    //    Pitch is only written when the source is audible to avoid a click
+    //    from a stale value on first activation.
     // ─────────────────────────────────────────────────────────────────────────
 
-    void AudioEngine::updateFromGrid(const GridResult& grid) {
+    void AudioEngine::updateFromObstacles(const ObstacleFrame& frame,
+                                          const float suppressionFactor) {
         if (!mReady) return;
 
-        // Landscape centre-column cells: 1 (top), 4 (mid), 7 (bot).
-        static constexpr int kCentreCells[3] = {1, 4, 7};
+        // Per-source accumulators: dominant gain and corresponding properties.
+        float targetGain [kNumSources] = { 0.0f, 0.0f };
+        float targetY    [kNumSources] = { mSmoothedY[0], mSmoothedY[1] };
+        float targetMag  [kNumSources] = { 0.0f, 0.0f };  // smoothedMag of best obstacle
 
-        // Per-side accumulators.
-        float leftStrength  = 0.0f, leftSumY  = 0.0f, leftTTC  = 0.0f;
-        float rightStrength = 0.0f, rightSumY = 0.0f, rightTTC = 0.0f;
-        // Track which single cell is the largest contributor so its TTC
-        // drives pitch — a weighted average of TTC is less meaningful.
-        float leftBest  = 0.0f;
-        float rightBest = 0.0f;
+        for (int i = 0; i < kMaxObstacles; ++i) {
+            const TrackedObstacle& obs = frame.obstacles[i];
+            if (!obs.active) continue;
 
-        for (int r = 0; r < 3; ++r) {
-            const CellMetrics& cell = grid.cells[kCentreCells[r]];
+            // ── Confidence → raw gain ─────────────────────────────────────────
+            // Map [kMinConfidence, kFullConfidence] → [0, 1], then apply
+            // master gain and suppression.  Values below kMinConfidence are
+            // silent regardless of suppression.
+            const float confNorm = std::clamp(
+                    (obs.confidenceScore - kMinConfidence) /
+                    (kFullConfidence     - kMinConfidence),
+                    0.0f, 1.0f);
+            const float rawGain = confNorm * suppressionFactor * kMasterGain;
 
-            // Not enough vectors to trust the mean angle estimate.
-            if (cell.sampleCount < kMinSamples) continue;
+            if (rawGain < 1e-4f) continue;   // nothing useful to contribute
 
-            // cos(meanAngle): +1 = pure rightward flow, -1 = pure leftward.
-            const float lateral   = std::cos(cell.meanAngle);
-            const float leftComp  = std::max(0.0f, -lateral);
-            const float rightComp = std::max(0.0f,  lateral);
+            // ── Position → left/right weights (linear pan law) ───────────────
+            // normX = 0 → all left, normX = 1 → all right, 0.5 → equal
+            const float panLeft  = 1.0f - obs.normX;
+            const float panRight = obs.normX;
 
-            // kLateralThresh filters cells where flow is primarily vertical.
-            // For a wall approached straight-on, centre-column angles are
-            // near ±π/2 (up/down) → cos ≈ 0 → neither side fires.
-            if (leftComp > kLateralThresh) {
-                const float s = leftComp * cell.dangerScore;
-                leftStrength  += s;
-                leftSumY      += kRowY[r] * s;
-                if (s > leftBest) { leftBest = s; leftTTC = cell.ttc; }
+            // ── Vertical position mapping ─────────────────────────────────────
+            // normY [0..1] (top..bottom) → alY [+0.5..-0.5] (head..floor).
+            const float alY = 0.5f - obs.normY;
+
+            // Keep only the dominant obstacle per side (maximum weighted gain).
+            // This prevents a swarm of low-confidence ghosts from accumulating.
+            const float leftContrib  = panLeft  * rawGain;
+            const float rightContrib = panRight * rawGain;
+
+            if (leftContrib > targetGain[0]) {
+                targetGain[0] = leftContrib;
+                targetY[0]    = alY;
+                targetMag[0]  = obs.smoothedMag;
             }
-            if (rightComp > kLateralThresh) {
-                const float s = rightComp * cell.dangerScore;
-                rightStrength  += s;
-                rightSumY      += kRowY[r] * s;
-                if (s > rightBest) { rightBest = s; rightTTC = cell.ttc; }
+            if (rightContrib > targetGain[1]) {
+                targetGain[1] = rightContrib;
+                targetY[1]    = alY;
+                targetMag[1]  = obs.smoothedMag;
             }
         }
 
-        // Weighted centroid Y; fall back to current smoothed value if no signal
-        // so the source drifts back to neutral rather than snapping.
-        const float targetY[kNumSources] = {
-                leftStrength  > 1e-6f ? leftSumY  / leftStrength  : mSmoothedY[0],
-                rightStrength > 1e-6f ? rightSumY / rightStrength : mSmoothedY[1]
-        };
-        const float strengths[kNumSources] = { leftStrength,  rightStrength  };
-        const float ttcs     [kNumSources] = { leftTTC,       rightTTC       };
-        const float panX     [kNumSources] = { -kSideX,       kSideX         };
+        // ── Apply to OpenAL sources ───────────────────────────────────────────
+
+        const float panX[kNumSources] = { -kSideX, kSideX };
 
         for (int s = 0; s < kNumSources; ++s) {
             const ALuint src = mSources[s];
 
             // ── Gain ──────────────────────────────────────────────────────────
-            const float targetGain = (strengths[s] < kMinLateral)
-                                     ? 0.0f
-                                     : std::clamp((strengths[s] - kMinLateral) / (kFullLateral - kMinLateral),
-                                                  0.0f, 1.0f) * kMasterGain;
-
-            mSmoothedGain[s] = kGainAlpha * targetGain
+            mSmoothedGain[s] = kGainAlpha * targetGain[s]
                                + (1.0f - kGainAlpha) * mSmoothedGain[s];
             alSourcef(src, AL_GAIN, mSmoothedGain[s]);
 
@@ -228,20 +248,17 @@ namespace assistivenav {
             alSource3f(src, AL_POSITION, panX[s], mSmoothedY[s], kSourceDepth);
 
             // ── Pitch ─────────────────────────────────────────────────────────
-            float targetPitch = kPitchLow;
-            if (ttcs[s] > 0.0f) {
-                const float t = 1.0f - std::clamp(
-                        (ttcs[s] - kMinTTCForHighPitch) /
-                        (kMaxTTCForPitch - kMinTTCForHighPitch),
-                        0.0f, 1.0f);
-                targetPitch = kPitchLow + t * (kPitchHigh - kPitchLow);
-            }
-            mSmoothedPitch[s] = kPitchAlpha * targetPitch
-                                + (1.0f - kPitchAlpha) * mSmoothedPitch[s];
-
-            // Only update pitch when audible to avoid a click on first activation
-            // from a stale pitch value left over from the previous session.
+            // Map smoothedMag [kPitchMagLow, kPitchMagHigh] → [kPitchLow, kPitchHigh].
+            // Only applied when audible to prevent a pop on first activation
+            // from a stale pitch accumulated during a previous silent period.
             if (mSmoothedGain[s] > 0.01f) {
+                const float t = std::clamp(
+                        (targetMag[s] - kPitchMagLow) /
+                        (kPitchMagHigh - kPitchMagLow),
+                        0.0f, 1.0f);
+                const float targetPitch = kPitchLow + t * (kPitchHigh - kPitchLow);
+                mSmoothedPitch[s] = kPitchAlpha * targetPitch
+                                    + (1.0f - kPitchAlpha) * mSmoothedPitch[s];
                 alSourcef(src, AL_PITCH, mSmoothedPitch[s]);
             }
         }
@@ -249,18 +266,19 @@ namespace assistivenav {
         // ── Diagnostics (every ~3 s at 30 fps) ───────────────────────────────
         if (++mDiagFrames >= 90) {
             mDiagFrames = 0;
-            LOGI("Lateral audio | "
-                 "left  str=%.2f g=%.3f p=%.2f y=%.2f | "
-                 "right str=%.2f g=%.3f p=%.2f y=%.2f",
-                 leftStrength,  mSmoothedGain[0], mSmoothedPitch[0], mSmoothedY[0],
-                 rightStrength, mSmoothedGain[1], mSmoothedPitch[1], mSmoothedY[1]);
+            LOGI("Obstacle audio | active=%d suppression=%.2f | "
+                 "left  g=%.3f p=%.2f y=%.2f | "
+                 "right g=%.3f p=%.2f y=%.2f",
+                 frame.activeCount, suppressionFactor,
+                 mSmoothedGain[0], mSmoothedPitch[0], mSmoothedY[0],
+                 mSmoothedGain[1], mSmoothedPitch[1], mSmoothedY[1]);
             const ALenum alErr = alGetError();
             if (alErr != AL_NO_ERROR) LOGE("OpenAL error: 0x%x", alErr);
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  shutdownOpenAL  (unchanged except kNumSources is now 2)
+    //  shutdownOpenAL  (unchanged)
     // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::shutdownOpenAL() {

@@ -18,33 +18,54 @@ namespace assistivenav {
     // ─────────────────────────────────────────────────────────────────────────
     // AudioEngine
     //
-    // Produces spatial audio cues driven by LATERAL flow in the centre column
-    // of the 3×3 grid (landscape cells 1, 4, 7).
+    // Produces spatial audio cues from a list of temporally stable, classified
+    // obstacle detections provided by ObstacleTracker.
     //
-    // WHY LATERAL-ONLY:
-    //   Forward obstacles produce radially-outward flow in the centre column.
-    //   For cells 1 and 7, that flow is mostly vertical; for cell 4, the mean
-    //   direction is undefined.  In all cases cos(meanAngle) ≈ 0 — the lateral
-    //   component is near zero — so audio stays silent for a straight-on wall.
-    //   An object crossing from the centre zone toward the left or right
-    //   produces strong lateral flow (cos(angle) → ±1), which is the only
-    //   condition that fires a source.
+    // SIDE SELECTION — position, not flow direction:
+    //   The previous design derived which ear to fire from cos(meanAngle) of
+    //   the optical flow.  This was broken when the user turned: background
+    //   objects produce rightward flow when the user turns left, so the "right"
+    //   source fired for an obstacle actually on the user's left.
     //
-    // SOURCE LAYOUT (2 sources):
-    //   Source 0 — left side   position (-kSideX, smoothedY, kSourceDepth)
-    //   Source 1 — right side  position (+kSideX, smoothedY, kSourceDepth)
+    //   The fix: use obstacle.normX, the horizontal centroid of the detected
+    //   blob in the camera frame.  An obstacle at normX = 0.2 is physically
+    //   to the left of frame centre regardless of how it is moving.  This is
+    //   immune to flow-direction inversion caused by head/body rotation.
     //
-    //   The Y position of each source tracks the weighted centroid of whichever
-    //   centre rows are contributing the most lateral signal.  This lets the
-    //   user distinguish a head-height obstacle from a floor-level one.
+    //   Linear pan law: left gain  = confidence × (1 − normX)
+    //                   right gain = confidence × normX
+    //   A centre obstacle (normX ≈ 0.5) fires both ears equally, which is the
+    //   correct percept for a hazard directly ahead.
     //
-    // GAIN:
-    //   lateral_strength = Σ over centre cells of (lateralComponent * dangerScore)
-    //   gain = clamp((strength - kMinLateral) / (kFullLateral - kMinLateral)) * kMasterGain
+    // ROTATION SUPPRESSION — suppressionFactor from ImuFusion:
+    //   AudioEngine receives a suppressionFactor ∈ [0, 1] computed from the
+    //   angular velocity estimated by ImuFusion.  All target gains are
+    //   multiplied by this factor, smoothly silencing the sources during fast
+    //   user rotation.  This eliminates false triggers caused by head turning
+    //   even when ImuFusion's flow compensation is imperfect.
+    //
+    //   suppressionFactor = 1 at low rotation (< kSoftRotThreshRad)
+    //   suppressionFactor = 0 at fast rotation (> kHardRotThreshRad)
+    //
+    // TEMPORAL STABILITY:
+    //   ObstacleTracker's 5-frame age gate and confidence threshold
+    //   (kMinBlobAnomaly) ensure only persistent detections reach this class.
+    //   No additional gating is needed inside AudioEngine; the conservative
+    //   kMinConfidence threshold here is a second line of defence.
     //
     // PITCH:
-    //   Modulated by TTC from the dominant contributing cell.
-    //   Low TTC (imminent) → high pitch; high TTC (distant) → low pitch.
+    //   Modulated by obstacle.smoothedMag, which is the EMA-filtered
+    //   anomaly-weighted flow magnitude.  Higher values indicate either a
+    //   faster-moving or closer obstacle, both of which warrant more urgency.
+    //
+    // VERTICAL POSITION:
+    //   Each source's Y position tracks obstacle.normY, giving HRTF a
+    //   vertical cue so the user can distinguish a head-level obstacle from a
+    //   floor-level one.
+    //
+    // SOURCE LAYOUT (2 sources):
+    //   Source 0 — left  position (−kSideX, smoothedY₀, kSourceDepth)
+    //   Source 1 — right position (+kSideX, smoothedY₁, kSourceDepth)
     // ─────────────────────────────────────────────────────────────────────────
 
     class AudioEngine {
@@ -55,14 +76,19 @@ namespace assistivenav {
         AudioEngine(const AudioEngine&)            = delete;
         AudioEngine& operator=(const AudioEngine&) = delete;
 
-        /** PRIMARY audio update — lateral flow from center-column cells drives
-         *  left/right spatial sources.  Called every frame from camera thread.
-         *  Must not allocate heap memory. */
-        void updateFromGrid(const GridResult& grid);
-
-        /** No-op stub kept so the ObstacleTracker path in jni_bridge compiles
-         *  without restructuring; its output is not used for audio. */
-        void update(const ObstacleFrame& /*frame*/) {}
+        /** PRIMARY audio update.
+         *
+         *  frame           — from ObstacleTracker::update(); only obstacles
+         *                    with active=true and age≥kMinAgeForAudio reach
+         *                    this method.
+         *  suppressionFactor — ∈ [0,1]; 1 = no suppression, 0 = fully silent.
+         *                    Computed by jni_bridge from ImuFusion::
+         *                    rotationRateRadPerSec().  Scales all gains before
+         *                    EMA smoothing so the fade-out is gradual.
+         *
+         *  Must not allocate heap memory (called from camera executor thread). */
+        void updateFromObstacles(const ObstacleFrame& frame,
+                                 float suppressionFactor);
 
         bool isReady() const { return mReady; }
 
@@ -76,7 +102,7 @@ namespace assistivenav {
         std::array<float,  kNumSources> mSmoothedGain;
         std::array<float,  kNumSources> mSmoothedPitch;
         // Vertical position of each source, EMA-tracked independently.
-        // Allows the cue to convey whether the crossing object is at head,
+        // Allows the cue to convey whether the obstacle is at head,
         // chest, or floor height without the audio jumping discontinuously.
         std::array<float,  kNumSources> mSmoothedY;
 
@@ -85,51 +111,35 @@ namespace assistivenav {
 
         // ── Geometry ──────────────────────────────────────────────────────────
         // AL coordinate system: +Y = up, -Z = forward, listener at origin.
-        // kSideX places the source clearly to the side but not so far that
-        // HRTF externalisation fails (HRTF works best at ±90° ≈ ±1 unit).
         static constexpr float kSourceDepth = -1.5f;
         static constexpr float kSideX       = 1.0f;
 
-        // Y positions for the three centre rows (top = head, bot = floor).
-        static constexpr float kRowY[3] = { 0.5f, 0.0f, -0.5f };
+        // ── Confidence → gain mapping ─────────────────────────────────────────
+        // Confidence is ObstacleTracker's EMA-smoothed mean anomaly score.
+        // kMinConfidence matches ObstacleTracker::kMinBlobAnomaly so the
+        // second-order gate is never looser than the first.
+        static constexpr float kMinConfidence   = 0.30f;  // below → silent
+        static constexpr float kFullConfidence  = 0.75f;  // above → max gain
 
-        // ── Lateral flow thresholds ───────────────────────────────────────────
-
-        // Minimum fractional lateral component (|cos(angle)|) required before
-        // a cell contributes to the lateral signal.  Suppresses cells where
-        // flow is primarily vertical (approaching wall, floor texture).
-        static constexpr float kLateralThresh = 0.35f;
-
-        // Minimum cell sample count for a reliable meanAngle estimate.
-        static constexpr int   kMinSamples    = 3;
-
-        // ── Gain mapping ──────────────────────────────────────────────────────
-
-        // Lateral strength below this → silence.
-        // strength = Σ(lateralComp * dangerScore) over centre cells.
-        static constexpr float kMinLateral  = 0.06f;
-
-        // Lateral strength at which gain reaches kMasterGain.
-        static constexpr float kFullLateral = 0.42f;
-
-        static constexpr float kMasterGain  = 0.65f;
+        static constexpr float kMasterGain      = 0.65f;
 
         // EMA weight for gain updates (~4-frame window at 30 fps).
-        // Fast enough to track a rapidly crossing object; slow enough to
-        // prevent clicks from frame-to-frame dangerScore fluctuation.
-        static constexpr float kGainAlpha   = 0.18f;
+        static constexpr float kGainAlpha       = 0.18f;
 
-        // EMA weight for vertical position tracking.
-        // Deliberately slower than gain so the Y position settles smoothly
-        // even when only one row is hot at a time.
-        static constexpr float kYAlpha      = 0.10f;
+        // EMA weight for vertical position tracking (deliberately slower than
+        // gain so the Y cue settles smoothly even when only one obstacle is hot).
+        static constexpr float kYAlpha          = 0.10f;
 
-        // ── Pitch mapping (TTC → urgency) ─────────────────────────────────────
-        static constexpr float kPitchLow           = 0.80f;
-        static constexpr float kPitchHigh          = 1.40f;
-        static constexpr float kMinTTCForHighPitch  = 10.0f;
-        static constexpr float kMaxTTCForPitch      = 80.0f;
-        static constexpr float kPitchAlpha          = 0.15f;
+        // ── Pitch mapping (smoothedMag → urgency) ─────────────────────────────
+        // smoothedMag is the anomaly-weighted flow magnitude (px/frame).
+        // Higher value → obstacle is either closer or approaching faster.
+        // This avoids a TTC-to-pitch conversion that could be undefined when
+        // smoothedMag is near zero.
+        static constexpr float kPitchMagLow     = 2.0f;   // slow/distant → kPitchLow
+        static constexpr float kPitchMagHigh    = 12.0f;  // fast/close   → kPitchHigh
+        static constexpr float kPitchLow        = 0.80f;
+        static constexpr float kPitchHigh       = 1.40f;
+        static constexpr float kPitchAlpha      = 0.15f;
 
         // ── Noise buffer ──────────────────────────────────────────────────────
         static constexpr int   kSampleRate  = 44100;

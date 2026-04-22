@@ -13,6 +13,7 @@ namespace assistivenav {
             : mWidth(width),
               mHeight(height),
               mFocalLengthPx(kFallbackFocalLengthPx),
+              mLastAngVelRadPerSec(0.0f),
               mReadIdx(0),
               mHasData(false),
               mPrevTimestampNs(0),
@@ -115,9 +116,19 @@ namespace assistivenav {
     // ─────────────────────────────────────────────────────────────────────────
     //  compensate  — camera executor thread
     //
-    //  Uses mFocalLengthPx (set at startup from CameraCharacteristics) instead
-    //  of the old compile-time constant kFocalLengthPx = 500.  All arithmetic
-    //  is otherwise identical to the previous implementation.
+    //  Subtracts rotation-induced displacement from every flow vector, then
+    //  stores the estimated angular velocity for AudioEngine to read.
+    //
+    //  Angular velocity derivation:
+    //    qDelta.w = cos(θ/2)  where θ is the rotation angle over one frame.
+    //    Clamping |w| to [0,1] before acos guards against floating-point
+    //    values slightly outside this range (numerical artifact).
+    //    ω = θ × kAssumedFrameHz converts angle/frame to rad/s.
+    //
+    //  This approach avoids adding a second sensor stream (TYPE_GYROSCOPE)
+    //  and uses the already-fused, filtered rotation-vector data that
+    //  ImuFusion processes anyway.  Accuracy is sufficient for threshold
+    //  comparisons; we do not need a calibrated gyroscope measurement.
     // ─────────────────────────────────────────────────────────────────────────
 
     void ImuFusion::compensate(FlowResult& result) {
@@ -127,12 +138,23 @@ namespace assistivenav {
                 mSlot[mReadIdx.load(std::memory_order_acquire)];
 
         if (!mHasPrev) {
-            mPrevQuat = currQuat;
-            mHasPrev  = true;
+            mPrevQuat             = currQuat;
+            mHasPrev              = true;
+            mLastAngVelRadPerSec  = 0.0f;
             return;
         }
 
         const Quaternion qDelta = multiplyQuat(currQuat, conjugateQuat(mPrevQuat));
+
+        // ── Estimate angular velocity for the audio suppression gate ──────────
+        // qDelta.w ≈ 1 means near-zero rotation; lower values mean more
+        // rotation.  Converting to an angle and scaling by frame rate gives
+        // rad/s, which AudioEngine can compare against its rotation thresholds.
+        {
+            const float halfAngle        = std::acos(
+                    std::clamp(std::abs(qDelta.w), 0.0f, 1.0f));
+            mLastAngVelRadPerSec = halfAngle * 2.0f * kAssumedFrameHz;
+        }
 
         // w > 0.9999990 ↔ |rotation angle| < 0.05°.  Skip — pure numerical noise.
         if (qDelta.w > 0.9999990f) {

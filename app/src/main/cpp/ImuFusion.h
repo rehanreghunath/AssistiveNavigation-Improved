@@ -35,12 +35,23 @@ namespace assistivenav {
     //   If CameraCharacteristics is unavailable (emulator, unit tests), the
     //   hardcoded fallback kFallbackFocalLengthPx = 500 is used automatically.
     //
+    // Rotation rate (new):
+    //   compensate() stores an estimated angular velocity derived from the
+    //   delta quaternion between consecutive calls.  AudioEngine reads this
+    //   via rotationRateRadPerSec() to suppress spatial audio during user
+    //   rotation without requiring a separate gyroscope sensor stream.
+    //
+    //   θ = 2·acos(|qDelta.w|); ω = θ × kAssumedFrameHz (rad/s).
+    //
     // Thread-safety contract:
     //   updateRotation() is called from the Android sensor thread.
     //   compensate()     is called from the camera executor thread.
     //   setFocalLength() is called once from the main thread before the first
     //                    camera frame, so no lock is needed — the caller must
     //                    ensure it races no camera frames.
+    //   rotationRateRadPerSec() must be called from the camera executor thread
+    //                    only (same thread as compensate(), no extra locking
+    //                    needed).
     // ─────────────────────────────────────────────────────────────────────────
 
     class ImuFusion {
@@ -64,11 +75,18 @@ namespace assistivenav {
 
         /** Subtract rotation-induced displacement from every FlowVector
          *  in-place.  Recomputes magnitude and angle after adjustment.
+         *  Also updates the internal angular-velocity estimate.
          *  Called from the camera executor thread. */
         void compensate(FlowResult& result);
 
         /** Return the focal length currently in use (pixels). */
         float focalLengthPx() const { return mFocalLengthPx; }
+
+        /** Return the angular velocity estimated from the most recent call to
+         *  compensate().  Derived from the angle of the delta quaternion; no
+         *  extra sensor or mutex required.  Call from the camera executor
+         *  thread only (same thread as compensate()). */
+        float rotationRateRadPerSec() const { return mLastAngVelRadPerSec; }
 
     private:
         const int mWidth;
@@ -82,7 +100,13 @@ namespace assistivenav {
         static constexpr float kMinPlausibleFx = 100.0f;
         static constexpr float kMaxPlausibleFx = 5000.0f;
 
-        float mFocalLengthPx;   // set by setFocalLength(); fallback until then
+        // Used to convert the inter-frame rotation angle (radians) to rad/s.
+        // A fixed reference is sufficient because we only need threshold
+        // comparisons in AudioEngine, not a precisely calibrated measurement.
+        static constexpr float kAssumedFrameHz = 30.0f;
+
+        float mFocalLengthPx;            // set by setFocalLength(); fallback until then
+        float mLastAngVelRadPerSec;      // updated by compensate(); read by AudioEngine
 
         struct Quaternion {
             float x, y, z, w;
