@@ -111,8 +111,8 @@ namespace assistivenav {
             const float dy  = mNextPts[i].y - mPrevPts[i].y;
             const float mag = std::sqrt(dx * dx + dy * dy);
 
-// Keep tracking even sub-threshold points so feature count stays stable.
-// Only report vectors that clear the noise floor to downstream consumers.
+            // Keep tracking even sub-threshold points so feature count stays stable.
+            // Only report vectors that clear the noise floor to downstream consumers.
             survivors.push_back(mNextPts[i]);
 
             if (mag < kMinFlowMag) continue;

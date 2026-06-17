@@ -4,44 +4,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // GridAnalyzer
-    //
-    // Bins IMU-compensated flow vectors into a 3×3 grid and computes per-cell
-    // threat metrics plus a scene-wide Focus of Expansion (FOE).
-    //
-    // Changes from original design:
-    //
-    //  ISSUE 1 — RANSAC FOE
-    //    The original least-squares fit over ALL vectors was biased whenever
-    //    obstacle vectors were present (they pull the FOE toward themselves).
-    //    RANSAC finds a hypothesis from 2 vectors and counts geometric inliers,
-    //    so obstacle vectors — which do NOT pass through the true FOE — are
-    //    naturally excluded.  The final FOE is a least-squares refit over
-    //    inliers only, giving a clean background-only estimate.
-    //
-    //    Runtime: 30 iterations × 150 vectors = 4 500 cheap cross-product
-    //    evaluations.  Measured at < 0.3 ms on Helio G80 at 640×480.
-    //
-    //  ISSUE 2 — Temporal baseline / same-speed-mover hint
-    //    A person walking at the same speed as the user produces near-zero
-    //    RELATIVE optical flow — they look identical to a background surface
-    //    at the same depth.  Pure single-frame flow cannot distinguish them.
-    //
-    //    GridAnalyzer now maintains a per-cell EMA of mean magnitude.  When
-    //    a cell's current magnitude DIVERGES from its recent baseline (the
-    //    mover starts, stops, or changes speed), the change is detected as a
-    //    temporal anomaly and folded into dangerScore as a multiplicative boost.
-    //    This catches the transition moments and is the strongest passive cue
-    //    available without a separate object detector.
-    //
-    //    A full ML-based fallback (MobileNet SSD) is the correct long-term
-    //    solution; the temporal heuristic here is a lightweight complement.
-    //
-    // Thread-safety: analyze() is non-const (updates EMA state).  Call only
-    // from the camera executor thread, consistent with the rest of the pipeline.
-    // ─────────────────────────────────────────────────────────────────────────
-
     class GridAnalyzer {
     public:
         GridAnalyzer(int width, int height);
@@ -59,7 +21,7 @@ namespace assistivenav {
         const int mWidth;
         const int mHeight;
 
-        // ── Temporal baseline state (issue 2) ─────────────────────────────────
+        // Temporal baseline state
         // Slow EMA of per-cell mean magnitude tracks what "normal" looks like.
         // A sudden deviation (temporal anomaly) boosts the cell's dangerScore.
 
@@ -78,12 +40,12 @@ namespace assistivenav {
         float mCellMagEma[9];  // per-cell EMA of meanMag
         int   mFrameCount;     // total frames processed (governs warm-up)
 
-        // ── Flow thresholds ───────────────────────────────────────────────────
+        // Flow thresholds
         static constexpr float kMinActionableMag = 2.0f;
         static constexpr float kDangerNormScale  = 20.0f;
         static constexpr float kTTCScale         = 150.0f;
 
-        // ── RANSAC FOE constants (issue 1) ────────────────────────────────────
+        // RANSAC FOE constants
         // Maximum number of input vectors to consider.  Matches FlowEngine's
         // kMaxFeatures=200 with a small margin.
         static constexpr int   kMaxVecBuf            = 256;

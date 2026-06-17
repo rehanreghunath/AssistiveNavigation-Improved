@@ -17,10 +17,6 @@ namespace assistivenav {
         LOGI("Created for %dx%d", mWidth, mHeight);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  cellIndex
-    // ─────────────────────────────────────────────────────────────────────────
-
     int GridAnalyzer::cellIndex(float x, float y) const {
         const int col = static_cast<int>(
                 std::clamp(x * 3.0f / static_cast<float>(mWidth),  0.0f, 2.0f));
@@ -29,24 +25,12 @@ namespace assistivenav {
         return row * 3 + col;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  accumulateCells
-    //
-    //  Optimization: the original code computed sin(angle) and cos(angle) per
-    //  vector, which requires two transcendental function calls each.
-    //  Since fv.angle = atan2(dy, dx), we have:
-    //    sin(angle) = dy / magnitude
-    //    cos(angle) = dx / magnitude
-    //  Using the raw (dx, dy) components directly replaces ~200 sin/cos calls
-    //  per frame with ~200 divisions — about 4× faster on ARM Cortex-A75.
-    // ─────────────────────────────────────────────────────────────────────────
-
     void GridAnalyzer::accumulateCells(const FlowResult&           flow,
                                        std::array<CellMetrics, 9>& cells) const {
         float sumMag[9] = {};
         // Accumulate unit-vector components instead of sin/cos of angle.
-        float sumDyN[9] = {};  // Σ (dy / mag)  = Σ sin(angle)
-        float sumDxN[9] = {};  // Σ (dx / mag)  = Σ cos(angle)
+        float sumDyN[9] = {};
+        float sumDxN[9] = {};
         int   counts[9] = {};
 
         for (const FlowVector& fv : flow.vectors) {
@@ -86,7 +70,6 @@ namespace assistivenav {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  computeFOE  — RANSAC + least-squares refit on inliers
     //
     //  Geometric model: during forward translation every background point
@@ -108,7 +91,6 @@ namespace assistivenav {
     //
     //  After RANSAC, a standard least-squares refit over inliers only gives
     //  a more precise FOE with no outlier influence.
-    // ─────────────────────────────────────────────────────────────────────────
 
     void GridAnalyzer::computeFOE(const FlowResult& flow,
                                   float& outX, float& outY, bool& outValid) const {
@@ -148,14 +130,14 @@ namespace assistivenav {
         uint32_t rng = 0xDEADBEEFu ^ static_cast<uint32_t>(flow.timestampNs);
 
         for (int iter = 0; iter < kRansacIters; ++iter) {
-            // ── Sample two distinct indices ───────────────────────────────────
+            // Sample two distinct indices
             rng = rng * 1664525u + 1013904223u;   // Knuth LCG
             const int i = static_cast<int>((rng >> 16) % static_cast<uint32_t>(n));
             rng = rng * 1664525u + 1013904223u;
             int j = static_cast<int>((rng >> 16) % static_cast<uint32_t>(n - 1));
             if (j >= i) ++j;  // ensure distinct
 
-            // ── Two-vector FOE by Cramer's rule ───────────────────────────────
+            // Two-vector FOE by Cramer's rule
             // Line i: dy_i*(X - x0_i) = dx_i*(Y - y0_i)
             //   →  dy_i*X − dx_i*Y = dy_i*x0_i − dx_i*y0_i  (= ci)
             // Line j: similar (= cj)
@@ -173,7 +155,7 @@ namespace assistivenav {
             const float candX  = (vecs[i].dx * cj - vecs[j].dx * ci) * invDet;
             const float candY  = (vecs[i].dy * cj - vecs[j].dy * ci) * invDet;
 
-            // ── Count inliers (squared distance — no std::abs) ────────────────
+            // Count inliers (squared distance — no std::abs)
             int cnt = 0;
             for (int k = 0; k < n; ++k) {
                 const float cross = (candX - vecs[k].x0) * vecs[k].dy
@@ -191,7 +173,7 @@ namespace assistivenav {
 
         if (bestCount < kRansacMinInliers) return;
 
-        // ── Refit: least-squares over RANSAC inliers only ─────────────────────
+        // Refit: least-squares over RANSAC inliers only
         // Gives a statistically optimal FOE using only the background vectors
         // that RANSAC identified; obstacle vectors have no influence.
         float ata00 = 0.0f, ata11 = 0.0f, ata01 = 0.0f;
@@ -224,8 +206,7 @@ namespace assistivenav {
         outValid = true;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  updateTemporalBaseline  — issue 2
+    //  updateTemporalBaseline
     //
     //  Maintains a slow EMA of each cell's mean magnitude.  When the current
     //  frame deviates significantly from that baseline, the cell is behaving
@@ -238,7 +219,6 @@ namespace assistivenav {
     //  Limitation: a mover traveling at a perfectly steady speed indistinguishable
     //  from background will accumulate into the EMA and score zero anomaly.
     //  A dedicated object detector is required to close that gap.
-    // ─────────────────────────────────────────────────────────────────────────
 
     void GridAnalyzer::updateTemporalBaseline(std::array<CellMetrics, 9>& cells) {
         const float alpha = (mFrameCount < kWarmupFrames)
@@ -273,9 +253,7 @@ namespace assistivenav {
         ++mFrameCount;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  analyze  — public entry point
-    // ─────────────────────────────────────────────────────────────────────────
 
     GridResult GridAnalyzer::analyze(const FlowResult& flow) {
         GridResult result{};
@@ -283,8 +261,8 @@ namespace assistivenav {
         result.foeValid    = false;
 
         accumulateCells(flow, result.cells);
-        updateTemporalBaseline(result.cells);   // issue 2: boost after cells are populated
-        computeFOE(flow, result.foeX, result.foeY, result.foeValid);  // issue 1: RANSAC
+        updateTemporalBaseline(result.cells);   // boost after cells are populated
+        computeFOE(flow, result.foeX, result.foeY, result.foeValid);  // RANSAC
 
         return result;
     }

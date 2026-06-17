@@ -27,8 +27,7 @@ namespace assistivenav {
              mWidth, mHeight, mFocalLengthPx);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  setFocalLength  — issue 5
+    //  setFocalLength
     //
     //  Replaces the compile-time constant with a value computed from real
     //  CameraCharacteristics data:
@@ -37,7 +36,6 @@ namespace assistivenav {
     //  This should be called once from the main thread after nativeInit, before
     //  the camera stream begins.  Race safety: the camera executor thread has
     //  not started yet when this is called.
-    // ─────────────────────────────────────────────────────────────────────────
 
     void ImuFusion::setFocalLength(float focalLengthPx) {
         if (focalLengthPx < kMinPlausibleFx || focalLengthPx > kMaxPlausibleFx) {
@@ -51,9 +49,7 @@ namespace assistivenav {
              mFocalLengthPx, kFallbackFocalLengthPx);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Quaternion helpers
-    // ─────────────────────────────────────────────────────────────────────────
 
     ImuFusion::Quaternion ImuFusion::multiplyQuat(const Quaternion& a,
                                                   const Quaternion& b) {
@@ -97,9 +93,7 @@ namespace assistivenav {
         outDy = hy * invW - py;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  updateRotation  — sensor thread
-    // ─────────────────────────────────────────────────────────────────────────
 
     void ImuFusion::updateRotation(float qx, float qy, float qz, float qw,
                                    int64_t /* timestampNs */) {
@@ -113,7 +107,6 @@ namespace assistivenav {
         mHasData.store(true,      std::memory_order_release);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  compensate  — camera executor thread
     //
     //  Subtracts rotation-induced displacement from every flow vector, then
@@ -129,9 +122,9 @@ namespace assistivenav {
     //  and uses the already-fused, filtered rotation-vector data that
     //  ImuFusion processes anyway.  Accuracy is sufficient for threshold
     //  comparisons; we do not need a calibrated gyroscope measurement.
-    // ─────────────────────────────────────────────────────────────────────────
 
-    void ImuFusion::compensate(FlowResult& result) {
+
+    void ImuFusion::compensate(FlowResult &result) {
         if (!mHasData.load(std::memory_order_acquire)) return;
 
         const Quaternion currQuat =
@@ -146,7 +139,7 @@ namespace assistivenav {
 
         const Quaternion qDelta = multiplyQuat(currQuat, conjugateQuat(mPrevQuat));
 
-        // ── Estimate angular velocity for the audio suppression gate ──────────
+        // Estimate angular velocity for the audio suppression gate
         // qDelta.w ≈ 1 means near-zero rotation; lower values mean more
         // rotation.  Converting to an angle and scaling by frame rate gives
         // rad/s, which AudioEngine can compare against its rotation thresholds.
@@ -156,7 +149,7 @@ namespace assistivenav {
             mLastAngVelRadPerSec = halfAngle * 2.0f * kAssumedFrameHz;
         }
 
-        // w > 0.9999990 ↔ |rotation angle| < 0.05°.  Skip — pure numerical noise.
+        // w > 0.9999990 <-> |rotation angle| < 0.05°.  Skip — pure numerical noise.
         if (qDelta.w > 0.9999990f) {
             mPrevQuat = currQuat;
             return;

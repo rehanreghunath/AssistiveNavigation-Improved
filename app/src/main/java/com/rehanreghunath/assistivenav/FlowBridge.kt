@@ -10,8 +10,6 @@ object FlowBridge {
      *  After this returns, call [nativeSetFocalLength] with the real lens data
      *  before the first camera frame is submitted. */
     external fun nativeInit(width: Int, height: Int)
-
-    // ── Issue 5: runtime focal length calibration ──────────────────────────
     /**
      * Override the focal length used for IMU rotation compensation.
      *

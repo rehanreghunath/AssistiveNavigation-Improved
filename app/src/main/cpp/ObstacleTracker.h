@@ -4,7 +4,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
     // ObstacleTracker
     //
     // Converts anomaly-classified, IMU-compensated flow vectors into a small
@@ -35,7 +34,6 @@ namespace assistivenav {
     //   5. OUTPUT GATE — obstacle is forwarded to AudioEngine only after it has
     //      been tracked for kMinAgeForAudio frames AND its confidenceScore
     //      exceeds kMinBlobAnomaly.
-    // ─────────────────────────────────────────────────────────────────────────
 
     class ObstacleTracker {
     public:
@@ -57,12 +55,12 @@ namespace assistivenav {
 
         std::array<TrackedObstacle, kMaxObstacles> mObstacles;
 
-        // ── Analysis grid ─────────────────────────────────────────────────────
+        // Analysis grid
         static constexpr int kGridCols  = 12;
         static constexpr int kGridRows  = 8;
         static constexpr int kGridCells = kGridCols * kGridRows; // 96
 
-        // ── Activity thresholds ───────────────────────────────────────────────
+        // Activity thresholds
 
         // Minimum flow vectors for a cell to be considered.
         static constexpr int   kMinVectors      = 2;
@@ -77,7 +75,7 @@ namespace assistivenav {
         // are excluded even if their raw magnitude is high.
         static constexpr float kMinMeanAnomaly  = 0.25f;
 
-        // ── Blob / obstacle thresholds ────────────────────────────────────────
+        // Blob / obstacle thresholds
 
         static constexpr float kMatchRadius     = 0.25f;   // normalised distance
 
@@ -102,7 +100,7 @@ namespace assistivenav {
         static constexpr float kAlphaPos        = 0.4f;
         static constexpr float kAlphaConf       = 0.3f;
 
-        // ── Internal blob type (stack-only) ───────────────────────────────────
+        // Internal blob type (stack-only)
         struct Blob {
             float normX;            // anomaly-weighted centroid, normalised [0,1]
             float normY;

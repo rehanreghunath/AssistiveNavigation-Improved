@@ -16,7 +16,7 @@ namespace assistivenav {
         const float imgW = static_cast<float>(width);
         const float imgH = static_cast<float>(height);
 
-        // ── No FOE: apply spatial prior only ─────────────────────────────────
+        // No FOE: apply spatial prior only
         // This happens on the first processed frame or in textureless scenes.
         // Without a FOE we cannot compute angular anomaly; fall back to a
         // moderate score so downstream thresholds are not trivially met.
@@ -36,7 +36,7 @@ namespace assistivenav {
         const float foeX_px = grid.foeX * imgW;
         const float foeY_px = grid.foeY * imgH;
 
-        // ── Pass 1: estimate background ego-motion scale ──────────────────────
+        // Pass 1: estimate background ego-motion scale
         // For each vector with small angular deviation we compute
         //   magnitude / foe_distance  (= ego-motion rate, px of flow per px of FOE offset)
         // The mean of this ratio across background vectors is our scale estimate.
@@ -71,13 +71,13 @@ namespace assistivenav {
                                     ? bgScaleSum / static_cast<float>(bgCount)
                                     : 0.0f;
 
-        // ── Pass 2: score each vector ─────────────────────────────────────────
+        // Pass 2: score each vector
         for (auto& fv : result.vectors) {
             const float dxF     = fv.x0 - foeX_px;
             const float dyF     = fv.y0 - foeY_px;
             const float foeDist = std::sqrt(dxF * dxF + dyF * dyF);
 
-            // ── A. Angular anomaly ────────────────────────────────────────────
+            // Angular anomaly
             // Measures how much the flow direction deviates from the radially-
             // outward prediction.  Quadratic curve: small deviations (noise) are
             // suppressed; large deviations (lateral motion, convergence) are
@@ -92,7 +92,7 @@ namespace assistivenav {
                 angleAnomaly = t * t;   // ∈ [0,1], quadratic
             }
 
-            // ── B. Magnitude anomaly ──────────────────────────────────────────
+            // Magnitude anomaly
             // How many times larger is this vector than a background vector at
             // the same FOE distance would be?
             // Ratio = 1 → background-consistent.
@@ -107,7 +107,7 @@ namespace assistivenav {
                         (ratio - 1.0f) / (kAnomalyRatioCap - 1.0f), 0.0f, 1.0f);
             }
 
-            // ── C. Spatial prior ──────────────────────────────────────────────
+            // Spatial prior
             // For a chest-mounted phone aimed horizontally:
             //   bottom of frame  → floor (navigation hazard from tracking artefacts)
             //   top of frame     → ceiling (rarely a navigation hazard)
@@ -135,7 +135,7 @@ namespace assistivenav {
                 spatialFactor = 1.0f - 0.55f * depth;
             }
 
-            // ── Final score ───────────────────────────────────────────────────
+            // Final score
             const float raw = kAngleWeight * angleAnomaly + kMagWeight * magAnomaly;
             fv.anomalyScore  = std::clamp(raw * spatialFactor, 0.0f, 1.0f);
         }

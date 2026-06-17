@@ -26,7 +26,7 @@ static std::mutex gPipelineMutex;
 
 static constexpr int kGridResultFloats = 9 * 5 + 3;  // 48
 
-// ─────────────────────────────────────────────────────────────────────────────
+//
 //  computeSuppressionFactor
 //
 //  Maps ImuFusion's angular velocity estimate to a [0, 1] suppression
@@ -44,7 +44,7 @@ static constexpr int kGridResultFloats = 9 * 5 + 3;  // 48
 //
 //  Setting kSoftThresh at 0.30 leaves normal ambulation untouched.
 //  Setting kHardThresh at 1.20 ensures any deliberate scan suppresses audio.
-// ─────────────────────────────────────────────────────────────────────────────
+//
 
 static float computeSuppressionFactor(const float rotRateRadPerSec) {
     static constexpr float kSoftThresh = 0.30f;   // ~17°/s — suppression begins
@@ -86,20 +86,18 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeSetFocalLength(
     if (gImuFusion) gImuFusion->setFocalLength(static_cast<float>(focalLengthPx));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+//
 //  nativeUpdateImu  — sensor callback
 //
-//  The mutex previously held here was unnecessary: ImuFusion uses atomic
-//  double-buffering internally (mReadIdx, mHasData), so updateRotation() is
-//  already safe to call from the sensor thread concurrently with compensate()
+//  ImuFusion uses atomic double-buffering internally (mReadIdx, mHasData), so updateRotation() is
+//  safe to call from the sensor thread concurrently with compensate()
 //  on the camera thread.
 //
-//  The only genuine race is against nativeInit / nativeDestroy which write
-//  gImuFusion itself.  Those are lifecycle events that run on the UI thread;
+//  nativeInit / nativeDestroy write gImuFusion itself.  Those are lifecycle events that run on the UI thread;
 //  the SensorEventListener is unregistered in onPause() before onDestroy()
 //  calls stopPipeline(), so in practice gImuFusion is always valid here.
 //  The null check below guards the residual theoretical window.
-// ─────────────────────────────────────────────────────────────────────────────
+//
 
 JNIEXPORT void JNICALL
 Java_com_rehanreghunath_assistivenav_FlowBridge_nativeUpdateImu(
@@ -112,13 +110,11 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeUpdateImu(
     jfloat q[5] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
     env->GetFloatArrayRegion(quaternion, 0, std::min(len, static_cast<jsize>(5)), q);
 
-    // No pipeline mutex needed — ImuFusion is atomically double-buffered.
     if (gImuFusion)
         gImuFusion->updateRotation(q[0], q[1], q[2], q[3],
                                    static_cast<int64_t>(timestampNs));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 //  nativeProcessFrame — full pipeline
 //
 //  Audio trigger path (restored and extended):
@@ -129,9 +125,7 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeUpdateImu(
 //      → computeSuppressionFactor(ImuFusion::rotationRateRadPerSec())
 //      → AudioEngine::updateFromObstacles(frame, suppressionFactor)
 //
-//  Key improvements over the previous updateFromGrid path:
-//
-//    SIDE SELECTION: AudioEngine now uses obstacle.normX (blob centroid X)
+//    SIDE SELECTION: AudioEngine uses obstacle.normX (blob centroid X)
 //    for left/right panning.  This is immune to the flow-direction inversion
 //    that occurred when the user turned: background objects generate flow in
 //    the opposite direction to the user's motion, whereas the obstacle's
@@ -150,7 +144,7 @@ Java_com_rehanreghunath_assistivenav_FlowBridge_nativeUpdateImu(
 //    whose vectors deviate from the background ego-motion pattern.  Floor
 //    texture and distant static walls receive low anomaly and are suppressed
 //    at the activity-grid stage.
-// ─────────────────────────────────────────────────────────────────────────────
+//
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_rehanreghunath_assistivenav_FlowBridge_nativeProcessFrame(

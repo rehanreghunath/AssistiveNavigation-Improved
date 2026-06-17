@@ -55,9 +55,7 @@ class MainActivity : AppCompatActivity() {
         private const val IMU_DELAY        = SensorManager.SENSOR_DELAY_GAME
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Lifecycle
-    // ─────────────────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,9 +92,7 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Pipeline control
-    // ─────────────────────────────────────────────────────────────────────────
 
     private fun onToggle() {
         if (isRunning) stopPipeline()
@@ -134,8 +130,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  Focal length calibration  — issue 5
+    //  Focal length calibration
     //
     //  Reads the real physical focal length from CameraCharacteristics and
     //  converts it to pixels using the known sensor size and image resolution.
@@ -150,7 +145,6 @@ class MainActivity : AppCompatActivity() {
     //
     //  Returns null if the characteristics cannot be read (emulator, no camera2
     //  support).  In that case the native fallback of 500 px is used.
-    // ─────────────────────────────────────────────────────────────────────────
 
     private fun computeFocalLengthPx(imageWidthPx: Int): Float? {
         return try {
@@ -188,9 +182,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Camera
-    // ─────────────────────────────────────────────────────────────────────────
 
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
@@ -230,10 +222,7 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Frame analysis
-    // ─────────────────────────────────────────────────────────────────────────
-
     private inner class FrameAnalyzer : ImageAnalysis.Analyzer {
         private var yBuffer: ByteArray? = null
         private var bitmap: android.graphics.Bitmap? = null
@@ -263,11 +252,6 @@ class MainActivity : AppCompatActivity() {
 
                 if (!pipelineInitialized) {
                     FlowBridge.nativeInit(w, h)
-
-                    // ── Issue 5: pass real focal length before first frame ────
-                    // computeFocalLengthPx() accesses CameraCharacteristics on
-                    // the camera executor thread.  This is safe — it reads
-                    // read-only hardware metadata and is not UI work.
                     val fPx = computeFocalLengthPx(w)
                     if (fPx != null) {
                         FlowBridge.nativeSetFocalLength(fPx)
@@ -335,9 +319,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  Permissions
-    // ─────────────────────────────────────────────────────────────────────────
 
     private fun hasCameraPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==

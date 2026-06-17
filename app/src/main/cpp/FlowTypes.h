@@ -6,7 +6,7 @@
 
 namespace assistivenav {
 
-    // ── Optical-flow output ───────────────────────────────────────────────────
+    // Optical-flow output
 
     struct FlowVector {
         float x0, y0;       // pixel origin of the tracked point
@@ -28,7 +28,7 @@ namespace assistivenav {
         bool    isFirstFrame;
     };
 
-    // ── Grid-analysis output ──────────────────────────────────────────────────
+    // Grid-analysis output
 
     struct CellMetrics {
         float meanMag;
@@ -46,7 +46,7 @@ namespace assistivenav {
         int64_t timestampNs;
     };
 
-    // ── Obstacle tracking output ──────────────────────────────────────────────
+    // Obstacle tracking output
 
     static constexpr int kMaxObstacles = 5;
 

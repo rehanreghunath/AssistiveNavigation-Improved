@@ -15,7 +15,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
     // AudioEngine
     //
     // Produces spatial audio cues from a list of temporally stable, classified
@@ -32,12 +31,12 @@ namespace assistivenav {
     //   to the left of frame centre regardless of how it is moving.  This is
     //   immune to flow-direction inversion caused by head/body rotation.
     //
-    //   Linear pan law: left gain  = confidence × (1 − normX)
-    //                   right gain = confidence × normX
+    //   Linear pan law: left gain  = confidence x (1 − normX)
+    //                   right gain = confidence x normX
     //   A centre obstacle (normX ≈ 0.5) fires both ears equally, which is the
     //   correct percept for a hazard directly ahead.
     //
-    // ROTATION SUPPRESSION — suppressionFactor from ImuFusion:
+    // ROTATION SUPPRESSION - suppressionFactor from ImuFusion:
     //   AudioEngine receives a suppressionFactor ∈ [0, 1] computed from the
     //   angular velocity estimated by ImuFusion.  All target gains are
     //   multiplied by this factor, smoothly silencing the sources during fast
@@ -64,9 +63,8 @@ namespace assistivenav {
     //   floor-level one.
     //
     // SOURCE LAYOUT (2 sources):
-    //   Source 0 — left  position (−kSideX, smoothedY₀, kSourceDepth)
-    //   Source 1 — right position (+kSideX, smoothedY₁, kSourceDepth)
-    // ─────────────────────────────────────────────────────────────────────────
+    //   Source 0 — left  position (−kSideX, smoothedY0, kSourceDepth)
+    //   Source 1 — right position (+kSideX, smoothedY1, kSourceDepth)
 
     class AudioEngine {
     public:
@@ -109,12 +107,12 @@ namespace assistivenav {
         bool mReady;
         int  mDiagFrames;
 
-        // ── Geometry ──────────────────────────────────────────────────────────
+        // Geometry
         // AL coordinate system: +Y = up, -Z = forward, listener at origin.
         static constexpr float kSourceDepth = -1.5f;
         static constexpr float kSideX       = 1.0f;
 
-        // ── Confidence → gain mapping ─────────────────────────────────────────
+        // Confidence → gain mapping
         // Confidence is ObstacleTracker's EMA-smoothed mean anomaly score.
         // kMinConfidence matches ObstacleTracker::kMinBlobAnomaly so the
         // second-order gate is never looser than the first.
@@ -130,7 +128,7 @@ namespace assistivenav {
         // gain so the Y cue settles smoothly even when only one obstacle is hot).
         static constexpr float kYAlpha          = 0.10f;
 
-        // ── Pitch mapping (smoothedMag → urgency) ─────────────────────────────
+        // Pitch mapping (smoothedMag → urgency)
         // smoothedMag is the anomaly-weighted flow magnitude (px/frame).
         // Higher value → obstacle is either closer or approaching faster.
         // This avoids a TTC-to-pitch conversion that could be undefined when
@@ -141,7 +139,7 @@ namespace assistivenav {
         static constexpr float kPitchHigh       = 1.40f;
         static constexpr float kPitchAlpha      = 0.15f;
 
-        // ── Noise buffer ──────────────────────────────────────────────────────
+        // Noise buffer
         static constexpr int   kSampleRate  = 44100;
         static constexpr int   kNoiseFrames = 44100;
         static constexpr float kHpAlpha     = 0.9715f;

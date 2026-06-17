@@ -10,10 +10,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  Constructor / Destructor
-    // ─────────────────────────────────────────────────────────────────────────
-
     AudioEngine::AudioEngine()
             : mDevice(nullptr), mContext(nullptr), mNoiseBuffer(0),
               mSources{}, mSmoothedGain{}, mSmoothedPitch{}, mSmoothedY{},
@@ -25,10 +21,6 @@ namespace assistivenav {
     }
 
     AudioEngine::~AudioEngine() { shutdownOpenAL(); }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  initOpenAL  (unchanged)
-    // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::initOpenAL() {
         setenv("ALSOFT_ANDROID_STREAM_TYPE", "3", 1);
@@ -72,10 +64,6 @@ namespace assistivenav {
         LOGI("AudioEngine ready");
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  generateNoiseBuffer  (unchanged)
-    // ─────────────────────────────────────────────────────────────────────────
-
     void AudioEngine::generateNoiseBuffer() {
         std::vector<int16_t> samples(kNoiseFrames);
         std::mt19937 rng(0xA55174u);
@@ -95,13 +83,12 @@ namespace assistivenav {
         else LOGI("Noise buffer OK (%d frames @ %d Hz)", kNoiseFrames, kSampleRate);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  initSources  (unchanged)
+    //  initSources
     //
     //  Two sources, both started at gain=0 to eliminate per-detection
     //  startup latency.  Initial Y is 0 (chest height); updateFromObstacles()
     //  will begin tracking the correct height once flow data arrives.
-    // ─────────────────────────────────────────────────────────────────────────
+
 
     void AudioEngine::initSources() {
         alGenSources(kNumSources, mSources.data());
@@ -130,16 +117,15 @@ namespace assistivenav {
         else LOGI("%d sources started silent (left / right)", kNumSources);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  updateFromObstacles
     //
-    //  PANNING APPROACH — normX, not flow direction:
+    //  PANNING APPROACH - normX, not flow direction:
     //
     //    Left weight  = (1 − normX):  1.0 at far left,  0.0 at far right
     //    Right weight = normX:         0.0 at far left,  1.0 at far right
     //
     //    Both weights are 0.5 when normX = 0.5 (obstacle directly ahead),
-    //    so a forward obstacle fires both ears at equal gain — the correct
+    //    so a forward obstacle fires both ears at equal gain - the correct
     //    HRTF percept for a hazard straight ahead.
     //
     //    This is immune to flow-direction inversion from head/body rotation
@@ -177,7 +163,6 @@ namespace assistivenav {
     //    Higher values correlate with either faster approach or closer range.
     //    Pitch is only written when the source is audible to avoid a click
     //    from a stale value on first activation.
-    // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::updateFromObstacles(const ObstacleFrame& frame,
                                           const float suppressionFactor) {
@@ -192,8 +177,8 @@ namespace assistivenav {
             const TrackedObstacle& obs = frame.obstacles[i];
             if (!obs.active) continue;
 
-            // ── Confidence → raw gain ─────────────────────────────────────────
-            // Map [kMinConfidence, kFullConfidence] → [0, 1], then apply
+            // Confidence -> raw gain
+            // Map [kMinConfidence, kFullConfidence] -> [0, 1], then apply
             // master gain and suppression.  Values below kMinConfidence are
             // silent regardless of suppression.
             const float confNorm = std::clamp(
@@ -204,13 +189,13 @@ namespace assistivenav {
 
             if (rawGain < 1e-4f) continue;   // nothing useful to contribute
 
-            // ── Position → left/right weights (linear pan law) ───────────────
+            // Position → left/right weights (linear pan law)
             // normX = 0 → all left, normX = 1 → all right, 0.5 → equal
             const float panLeft  = 1.0f - obs.normX;
             const float panRight = obs.normX;
 
-            // ── Vertical position mapping ─────────────────────────────────────
-            // normY [0..1] (top..bottom) → alY [+0.5..-0.5] (head..floor).
+            // Vertical position mapping
+            // normY [0..1] (top..bottom) -> alY [+0.5..-0.5] (head..floor).
             const float alY = 0.5f - obs.normY;
 
             // Keep only the dominant obstacle per side (maximum weighted gain).
@@ -230,25 +215,25 @@ namespace assistivenav {
             }
         }
 
-        // ── Apply to OpenAL sources ───────────────────────────────────────────
+        // Apply to OpenAL sources
 
         const float panX[kNumSources] = { -kSideX, kSideX };
 
         for (int s = 0; s < kNumSources; ++s) {
             const ALuint src = mSources[s];
 
-            // ── Gain ──────────────────────────────────────────────────────────
+            // Gain
             mSmoothedGain[s] = kGainAlpha * targetGain[s]
                                + (1.0f - kGainAlpha) * mSmoothedGain[s];
             alSourcef(src, AL_GAIN, mSmoothedGain[s]);
 
-            // ── Vertical position ─────────────────────────────────────────────
+            // Vertical position
             mSmoothedY[s] = kYAlpha * targetY[s]
                             + (1.0f - kYAlpha) * mSmoothedY[s];
             alSource3f(src, AL_POSITION, panX[s], mSmoothedY[s], kSourceDepth);
 
-            // ── Pitch ─────────────────────────────────────────────────────────
-            // Map smoothedMag [kPitchMagLow, kPitchMagHigh] → [kPitchLow, kPitchHigh].
+            // Pitch
+            // Map smoothedMag [kPitchMagLow, kPitchMagHigh] -> [kPitchLow, kPitchHigh].
             // Only applied when audible to prevent a pop on first activation
             // from a stale pitch accumulated during a previous silent period.
             if (mSmoothedGain[s] > 0.01f) {
@@ -263,7 +248,7 @@ namespace assistivenav {
             }
         }
 
-        // ── Diagnostics (every ~3 s at 30 fps) ───────────────────────────────
+        // Diagnostics (every ~3 s at 30 fps)
         if (++mDiagFrames >= 90) {
             mDiagFrames = 0;
             LOGI("Obstacle audio | active=%d suppression=%.2f | "
@@ -276,10 +261,6 @@ namespace assistivenav {
             if (alErr != AL_NO_ERROR) LOGE("OpenAL error: 0x%x", alErr);
         }
     }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  shutdownOpenAL  (unchanged)
-    // ─────────────────────────────────────────────────────────────────────────
 
     void AudioEngine::shutdownOpenAL() {
         if (!mReady) return;

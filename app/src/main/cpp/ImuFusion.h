@@ -6,7 +6,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
     // ImuFusion
     //
     // Receives Android rotation-vector sensor readings (quaternion) from the
@@ -20,7 +19,7 @@ namespace assistivenav {
     // a pure camera rotation would have caused, so only vectors caused by
     // independently moving objects (or forward translation) remain.
     //
-    // Issue 5 — Runtime focal length calibration:
+    //   Runtime focal length calibration:
     //   The original code hardcoded kFocalLengthPx = 500 px, a rough estimate
     //   for a 640×480 crop at ~65° HFOV.  A ±10% error in focal length
     //   produces a ±10% residual in the rotation compensation — noticeable as
@@ -52,7 +51,6 @@ namespace assistivenav {
     //   rotationRateRadPerSec() must be called from the camera executor thread
     //                    only (same thread as compensate(), no extra locking
     //                    needed).
-    // ─────────────────────────────────────────────────────────────────────────
 
     class ImuFusion {
     public:

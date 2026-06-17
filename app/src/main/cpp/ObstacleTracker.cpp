@@ -16,9 +16,6 @@ namespace assistivenav {
              mWidth, mHeight, kGridCols, kGridRows, kMaxObstacles);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  cellIndex
-    // ─────────────────────────────────────────────────────────────────────────
 
     int ObstacleTracker::cellIndex(float x, float y) const {
         const int col = static_cast<int>(
@@ -30,7 +27,7 @@ namespace assistivenav {
         return row * kGridCols + col;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    //
     //  extractBlobs
     //
     //  Step 1: bin vectors into the 96-cell activity grid using ANOMALY-WEIGHTED
@@ -39,14 +36,14 @@ namespace assistivenav {
     //
     //  Step 2: 4-connected flood-fill to form blobs.  Centroids and shape
     //          descriptors are computed on the stack — no heap allocation.
-    // ─────────────────────────────────────────────────────────────────────────
+    //
 
     void ObstacleTracker::extractBlobs(const FlowResult& flow,
                                        Blob out[kMaxBlobs],
                                        int& outCount) const {
         outCount = 0;
 
-        // ── Step 1: accumulate per-cell stats ─────────────────────────────────
+        // Step 1: accumulate per-cell stats
         float sumWeightedMag[kGridCells] = {};   // sum(mag * anomalyScore) per cell
         float sumAnomaly    [kGridCells] = {};   // sum(anomalyScore) per cell
         float sumRawMag     [kGridCells] = {};   // sum(magnitude)  — for diagnostics
@@ -74,7 +71,7 @@ namespace assistivenav {
             }
         }
 
-        // ── Step 2: 4-connected flood-fill ────────────────────────────────────
+        // Step 2: 4-connected flood-fill
         bool visited  [kGridCells] = {};
         int  dfsStack [kGridCells];
 
@@ -171,9 +168,7 @@ namespace assistivenav {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  matchAndUpdate
-    // ─────────────────────────────────────────────────────────────────────────
 
     void ObstacleTracker::matchAndUpdate(const Blob blobs[kMaxBlobs],
                                          int blobCount,
@@ -230,9 +225,7 @@ namespace assistivenav {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     //  update  — public entry point
-    // ─────────────────────────────────────────────────────────────────────────
 
     ObstacleFrame ObstacleTracker::update(const FlowResult& flow,
                                           const GridResult& /* grid */) {
@@ -254,7 +247,7 @@ namespace assistivenav {
             // but muted in audio — this avoids audio stutter when confidence
             // briefly dips for a real obstacle.
             if (mObstacles[i].active &&
-                (mObstacles[i].age           < kMinAgeForAudio ||
+                (mObstacles[i].age < kMinAgeForAudio ||
                  mObstacles[i].confidenceScore < kMinBlobAnomaly)) {
                 frame.obstacles[i].active = false;
             }

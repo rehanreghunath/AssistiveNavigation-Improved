@@ -27,11 +27,11 @@ set_target_properties(openal PROPERTIES
 
 add_library(assistivenav SHARED
     FlowEngine.cpp
-    GridAnalyzer.cpp      # 3×3 per-cell danger metrics and FOE estimation
+    GridAnalyzer.cpp
     FlowClassifier.cpp
-    ImuFusion.cpp         # rotation-vector compensation
-    ObstacleTracker.cpp   # blob clustering and temporal obstacle tracking
-    AudioEngine.cpp       # OpenAL-Soft HRTF spatial audio
+    ImuFusion.cpp
+    ObstacleTracker.cpp
+    AudioEngine.cpp
     jni_bridge.cpp
 )
 

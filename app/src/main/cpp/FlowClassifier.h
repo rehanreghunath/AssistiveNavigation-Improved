@@ -4,9 +4,6 @@
 
 namespace assistivenav {
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // FlowClassifier
-    //
     // Assigns an anomalyScore ∈ [0,1] to every FlowVector in-place.
     //
     //   0 → vector is fully explained by camera ego-motion (floor, ceiling,
@@ -41,7 +38,6 @@ namespace assistivenav {
     // Must be called AFTER ImuFusion::compensate() and GridAnalyzer::analyze()
     // (so rotational ego-motion is already subtracted and the current-frame FOE
     // is available).
-    // ─────────────────────────────────────────────────────────────────────────
 
     class FlowClassifier {
     public:
@@ -58,7 +54,7 @@ namespace assistivenav {
                       int width, int height) const;
 
     private:
-        // ── Tuning constants ──────────────────────────────────────────────────
+        // Tuning constants
 
         // Angular deviation (radians) below which a vector is treated as
         // background for the purpose of estimating the ego-motion scale.
@@ -75,7 +71,7 @@ namespace assistivenav {
 
         // A magnitude ratio of this value or higher maps to full magnitude
         // anomaly (1.0). Ratio = actual_mag / expected_ego_mag.
-        // 3× expected → clear obstacle (surface 3× closer than background).
+        // 3× expected → clear obstacle (surface 3x closer than background).
         static constexpr float kAnomalyRatioCap     = 5.0f;
 
         // Normalised Y thresholds (0 = top, 1 = bottom of frame).
